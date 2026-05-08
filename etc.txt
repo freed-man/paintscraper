@@ -1,0 +1,14 @@
+# In paintscraper/
+python merge_databases.py atu_full.json chipex_full.json colorndrive_full.json merged_database.json
+python prepare_swatches.py merged_database.json paint_swatches.json
+
+# Copy paint_swatches.json into coloureg/lookup/data/
+
+# In coloureg/
+git add lookup/data/paint_swatches.json lookup/models.py lookup/views.py lookup/migrations/0004_paintswatch.py lookup/management/commands/load_paint_swatches.py
+git commit -m "."
+git push heroku main
+
+# After deploy
+heroku run python manage.py migrate
+heroku run python manage.py load_paint_swatches

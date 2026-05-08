@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+*.log
+*_log.txt
+*_full.json
+merged_database.json
+.vscode/
