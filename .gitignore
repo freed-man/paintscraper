@@ -1,7 +1,7 @@
 __pycache__/
 *.pyc
 *.log
-*_log.txt
+#*_log.txt
 *.json
 .vscode/
 venv/
