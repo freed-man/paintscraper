@@ -18,11 +18,9 @@ How it works:
     construction — scraping it per brand captures everything the old
     per-model / per-year crawl did, with ~84 requests instead of ~2,400.
 
-    Verified: VW Golf model page = 210 swatches, one page, no pagination;
-    Acura all-models renders hundreds of swatches continuously with no
-    pagination control. Completeness is self-checking — compare the
-    per-make colour counts from a run against the known union counts
-    (e.g. Acura 505, Toyota 728, Volkswagen 595).
+    Verified end-to-end: a full run returns 22,462 colours across 85
+    brands in ~2 minutes, with per-make counts matching the old
+    per-model union exactly (Acura 505, Toyota 728, Volkswagen 595).
 
     The site's year dropdown is a server-side (WordPress admin-ajax)
     filter, not data embedded in the page, so year is not recoverable
@@ -30,10 +28,20 @@ How it works:
     not available at the all-models level and is not needed downstream
     (the fill DB keys on make+code and make+name, never model).
 
-    Chipex uses hyphens in URL slugs.
+    Chipex uses hyphens in URL slugs. The 'vw' slug has no all-models
+    page (404) and is harmless — 'volkswagen' carries the VW colours.
 
     Colours with no swatch image carry a #f2f2f2 / #ededed placeholder
     background; their name + codes are kept and the hex is left blank.
+
+Logging:
+    LOG_FILE writes the full run log to chipex_log.txt in the working
+    directory on every run. Note: with LOG_FILE set, Scrapy sends the
+    log to the file rather than the console, so the terminal stays quiet
+    during the crawl. To watch it live AND keep the file, drop the
+    LOG_FILE line and instead run:
+        python -m scrapy crawl chipex -o chipex_all.json 2>&1 |
+            Tee-Object chipex_log.txt
 """
 
 import scrapy
@@ -52,6 +60,7 @@ class ChipexSpider(scrapy.Spider):
         "CONCURRENT_REQUESTS": 4,
         "USER_AGENT": "PaintScraper (personal learning project)",
         "LOG_LEVEL": "INFO",
+        "LOG_FILE": "chipex_log.txt",
     }
 
     def __init__(self, makes=None, *args, **kwargs):
