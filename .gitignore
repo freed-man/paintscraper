@@ -1,11 +1,18 @@
+# Python
 __pycache__/
 *.pyc
-*.log
-#*_log.txt
+
+# Scrapy cache
+.scrapy/
+
+# Scrape outputs & data (regenerable — live in etc/)
+etc/
 *.json
+*.log
+*_log.txt
+
+# Editors & virtual envs
 .vscode/
 venv/
 .venv/
 env/
-etc.txt
-scrape_data.zip

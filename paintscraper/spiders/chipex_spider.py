@@ -1,40 +1,43 @@
 """
 Scrapy spider for https://chipex.co.uk/
 
-Filters: year, make, model (all optional)
-Outputs: year, manufacturer, model, color_name, color_codes
+Scrapes every paint colour for each brand in a single request per brand,
+using the brand's "All Models" page.
 
-URL pattern: /brands/{make}/{model}/?year={year}
+Outputs: manufacturer, color_name, color_codes, color_hex
+Filters: make (optional)
 
-Usage:
-    scrapy crawl chipex -a years=2025 -a makes=volkswagen -a models=id-3 -o chipex_colors.json
-    scrapy crawl chipex -a years=2024 -a makes=volkswagen -a models=golf,jetta -o chipex_colors.json
-    scrapy crawl chipex -a years=2024 -a makes=volkswagen -o chipex_vw_2024.json
-    scrapy crawl chipex -a makes=volkswagen -o chipex_vw_all.json
-    scrapy crawl chipex -o chipex_all.json         # entire site (slow!)
+URL pattern: /brands/{make}/all-models/
 
-Note:
-    Chipex lists colors per make (not per model). The same color page at
-    /brands/{make}/{model}/?year={year} shows all colors for that make+year
-    regardless of model. This means different models for the same make+year
-    will return identical color lists — this is how Chipex structures its data.
+How it works:
+    /brands/ is an A-Z index of brands. Each brand has an
+    /brands/{make}/all-models/ page that lists the brand's COMPLETE set
+    of colours (every model, every year) in one static page. A normal
+    model page (/brands/{make}/{model}/) is just that same all-models
+    list filtered down to one model, so all-models is the superset by
+    construction — scraping it per brand captures everything the old
+    per-model / per-year crawl did, with ~84 requests instead of ~2,400.
 
-    Chipex uses hyphens in URL slugs (id-3, id-buzz) while ATU uses dots
-    (id.3, id.buzz). Use the correct slug format for each spider.
+    Verified: VW Golf model page = 210 swatches, one page, no pagination;
+    Acura all-models renders hundreds of swatches continuously with no
+    pagination control. Completeness is self-checking — compare the
+    per-make colour counts from a run against the known union counts
+    (e.g. Acura 505, Toyota 728, Volkswagen 595).
 
-    When no year filter is given, the spider visits each model page to
-    discover available years from the site (no hardcoded year range).
+    The site's year dropdown is a server-side (WordPress admin-ajax)
+    filter, not data embedded in the page, so year is not recoverable
+    without an extra request per year. We scrape year-blind. Model is
+    not available at the all-models level and is not needed downstream
+    (the fill DB keys on make+code and make+name, never model).
+
+    Chipex uses hyphens in URL slugs.
+
+    Colours with no swatch image carry a #f2f2f2 / #ededed placeholder
+    background; their name + codes are kept and the hex is left blank.
 """
 
-import re
 import scrapy
 from urllib.parse import urlparse
-
-# Slugs to skip — not real models
-SKIP_SLUGS = {"all-models", "colours", "colors"}
-
-# Pattern for valid years (1950–2099)
-YEAR_PATTERN = re.compile(r"^(19[5-9]\d|20\d{2})$")
 
 
 class ChipexSpider(scrapy.Spider):
@@ -51,17 +54,11 @@ class ChipexSpider(scrapy.Spider):
         "LOG_LEVEL": "INFO",
     }
 
-    def __init__(self, years=None, makes=None, models=None, *args, **kwargs):
+    def __init__(self, makes=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.filter_years = set(
-            y.strip() for y in years.split(",")
-        ) if years else set()
         self.filter_makes = set(
             m.strip().lower() for m in makes.split(",")
         ) if makes else set()
-        self.filter_models = set(
-            m.strip().lower() for m in models.split(",")
-        ) if models else set()
 
     # -- Helpers ----------------------------------------------------------
 
@@ -79,7 +76,7 @@ class ChipexSpider(scrapy.Spider):
         path = urlparse(url).path if "://" in url else url
         return [p for p in path.strip("/").split("/") if p]
 
-    # -- Level 1: Makes ---------------------------------------------------
+    # -- Level 1: Brands --> straight to each brand's all-models page ------
 
     def parse(self, response):
         seen = set()
@@ -93,122 +90,28 @@ class ChipexSpider(scrapy.Spider):
                 if self.filter_makes and make_slug not in self.filter_makes:
                     continue
                 self.logger.info(f"Found make: {make_slug}")
-                yield response.follow(
-                    href,
-                    callback=self.parse_make,
+                yield scrapy.Request(
+                    response.urljoin(f"/brands/{make_slug}/all-models/"),
+                    callback=self.parse_colors,
                     cb_kwargs={"manufacturer": make_slug},
                 )
 
-    # -- Level 2: Models ---------------------------------------------------
+    # -- Level 2: Colours -------------------------------------------------
 
-    def parse_make(self, response, manufacturer):
-        seen = set()
-        for href in response.css("a::attr(href)").getall():
-            parts = self._path_parts(href)
-            if (
-                len(parts) == 3
-                and parts[0] == "brands"
-                and parts[1].lower() == manufacturer
-            ):
-                model_slug = parts[2].lower()
-                if model_slug in seen:
-                    continue
-                seen.add(model_slug)
-                if model_slug in SKIP_SLUGS:
-                    continue
-                if self.filter_models and model_slug not in self.filter_models:
-                    continue
-
-                if self.filter_years:
-                    # Years specified — skip discovery, go straight to colors
-                    for year in sorted(self.filter_years):
-                        url = response.urljoin(
-                            href.rstrip("/") + f"/?year={year}"
-                        )
-                        yield scrapy.Request(
-                            url,
-                            callback=self.parse_colors,
-                            cb_kwargs={
-                                "manufacturer": manufacturer,
-                                "model": model_slug,
-                                "year": year,
-                            },
-                        )
-                else:
-                    # No year filter — visit model page to discover years
-                    yield response.follow(
-                        href,
-                        callback=self.parse_model_years,
-                        cb_kwargs={
-                            "manufacturer": manufacturer,
-                            "model": model_slug,
-                            "href": href,
-                        },
-                    )
-
-    # -- Level 2b: Discover years from model page --------------------------
-
-    def parse_model_years(self, response, manufacturer, model, href):
+    def parse_colors(self, response, manufacturer):
         """
-        Extract available years from the year filter dropdown on the
-        model page. The dropdown contains plain text year values like
-        "2026", "2025", etc. We extract only from the filter section
-        to avoid picking up unrelated years from the page footer.
-        """
-        years = set()
-
-        # The year filter is a dropdown/select-style element.
-        # Years appear as standalone text nodes that are exactly 4 digits.
-        # We target elements near the "Filter by:" / "Year" section.
-        for el in response.css(".swatch-filter ::text, .year-filter ::text"):
-            text = el.get().strip()
-            if YEAR_PATTERN.match(text):
-                years.add(text)
-
-        # Fallback: if no years found via filter classes, scan all text
-        # but only accept years that appear as standalone text nodes
-        # (not embedded in sentences like "since 2009")
-        if not years:
-            for text in response.css("::text").getall():
-                text = text.strip()
-                if YEAR_PATTERN.match(text) and len(text) == 4:
-                    years.add(text)
-
-        if not years:
-            self.logger.warning(
-                f"No years found on {response.url} — skipping {model}"
-            )
-            return
-
-        self.logger.info(
-            f"Found {len(years)} years for {manufacturer}/{model}: "
-            f"{sorted(years)}"
-        )
-
-        base_url = response.urljoin(href.rstrip("/"))
-        for year in sorted(years):
-            yield scrapy.Request(
-                f"{base_url}/?year={year}",
-                callback=self.parse_colors,
-                cb_kwargs={
-                    "manufacturer": manufacturer,
-                    "model": model,
-                    "year": year,
-                },
-            )
-
-    # -- Level 3: Colors ---------------------------------------------------
-
-    def parse_colors(self, response, manufacturer, model, year):
-        """
-        Each color swatch is an <a> link containing:
+        Each colour swatch is an <a> link containing:
+            <div class="color-swatch" style="background: #173a5a"></div>
             <h6 class="text-center mb-2">COLOR NAME</h6>
             <p class="text-colour-code">CODE1;CODE2;CODE3</p>
 
-        For colors without a swatch image, there's an extra h6 with
-        class "txt-no-colour" showing "No Swatch Available" — the
-        :not() selector skips it and grabs the real color name.
+        Non-swatch /brands/ links (nav, model menu, brand logos) lack the
+        inner colour-name structure and are skipped automatically.
+        Colours with no swatch image use an extra h6.txt-no-colour
+        ("No Swatch Available") plus a #f2f2f2 / #ededed background —
+        :not() skips the placeholder name and the hex is left blank.
         """
+        count = 0
         for link in response.css("a[href*='/brands/']"):
             href = link.attrib.get("href", "")
             parts = self._path_parts(href)
@@ -218,7 +121,7 @@ class ChipexSpider(scrapy.Spider):
             if parts[1].lower() != manufacturer:
                 continue
 
-            # Color name — skip the "No Swatch Available" placeholder
+            # Colour name — skip the "No Swatch Available" placeholder
             name_el = link.css(
                 "h6.text-center.mb-2:not(.txt-no-colour)::text"
             ).get()
@@ -233,8 +136,8 @@ class ChipexSpider(scrapy.Spider):
             code_text = link.css("p.text-colour-code::text").get("")
             codes = [c.strip() for c in code_text.split(";") if c.strip()]
 
-            # Hex color from the swatch div's background style
-            # e.g. style="background: #851c20"
+            # Hex from the swatch div's background style
+            # e.g. style="background: #173a5a"
             # "No Swatch Available" uses #f2f2f2 / #ededed — treat as blank
             color_hex = ""
             swatch_style = link.css("div.color-swatch::attr(style)").get("")
@@ -243,11 +146,13 @@ class ChipexSpider(scrapy.Spider):
                 if hex_match.startswith("#") and hex_match.lower() not in ("#f2f2f2", "#ededed"):
                     color_hex = hex_match
 
+            count += 1
             yield {
-                "year": int(year),
                 "manufacturer": self._format_name(manufacturer),
-                "model": self._format_name(model),
                 "color_name": color_name,
                 "color_codes": ", ".join(codes),
                 "color_hex": color_hex,
             }
+
+        if count == 0:
+            self.logger.warning(f"No colours found on {response.url}")
