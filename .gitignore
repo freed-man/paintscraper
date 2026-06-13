@@ -5,11 +5,12 @@ __pycache__/
 # Scrapy cache
 .scrapy/
 
-# Scrape outputs & data (regenerable — live in etc/)
+# Scrape outputs & data — regenerable, never committed (root or etc/)
 etc/
 *.json
 *.log
 *_log.txt
+*.zip
 
 # Editors & virtual envs
 .vscode/

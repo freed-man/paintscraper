@@ -21,6 +21,15 @@ Usage:
     scrapy crawl colorndrive -o colorndrive_full.json
     scrapy crawl colorndrive -a makes=volkswagen -o colorndrive_vw.json
     scrapy crawl colorndrive -a makes=volkswagen -a models=id3,golf -o colorndrive_vw_sel.json
+
+Logging:
+    LOG_FILE writes the full run log to colorndrive_log.txt in the working
+    directory on every run. Note: with LOG_FILE set, Scrapy sends the log
+    to the file rather than the console, so the terminal stays quiet during
+    the crawl. To watch it live AND keep the file, drop the LOG_FILE line
+    and instead run:
+        python -m scrapy crawl colorndrive -o colorndrive_full.json 2>&1 |
+            Tee-Object colorndrive_log.txt
 """
 
 import re
@@ -39,6 +48,7 @@ class ColorNDriveSpider(scrapy.Spider):
         "CONCURRENT_REQUESTS": 4,
         "USER_AGENT": "PaintScraper (personal learning project)",
         "LOG_LEVEL": "INFO",
+        "LOG_FILE": "colorndrive_log.txt",
     }
 
     def __init__(self, makes=None, models=None, *args, **kwargs):

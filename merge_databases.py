@@ -1,63 +1,98 @@
 """
-Merge any number of paint colour databases into a single output.
+Build the consolidated paint bridge table from the scraper outputs.
 
-Each source is defined by:
-    name      — short identifier (e.g. 'atu', 'chipex')
-    path      — JSON file path
-    has_year  — does the source have reliable year info per record?
+This replaces the old year-aware merge AND prepare_swatches.py. Both
+chipex (make-level) and colorndrive (model-level) are now year-blind, so
+the entire year-reconciliation machinery is gone. The output is ONE table
+keyed by (manufacturer, code) that serves all three downstream jobs:
 
-Year-aware sources are processed first using strict (year, mfr, model) grouping
-and code-overlap matching. Year-blind sources are added after, only contributing
-records whose codes don't already exist for the same (mfr, model).
+    code -> name   (fill a missing colour name from a known code)
+    name -> code   (fill a missing code from a known colour name)
+    swatch         (the hex sits on the row as a column, blank if none)
 
-Strategy:
-    Step 1: Build records from year-aware sources with strong-match merging
-            (≥2 shared codes OR full subset — prevents over-merge of distinct
-            paints sharing one alternate code)
-    Step 2: Master hex table from ALL sources, with format validation
-    Step 3: Master name table from ALL sources, deduplicated
-    Step 4: Apply hex and names to merged records
-    Step 5: Add year-blind source records that don't already exist
-    Step 6: Tag year-blind sources on existing records that match by code
-    Step 7: Final dedup, classification, sort, drop over-merged records
+Output row schema (one per unique (manufacturer, code)):
 
-Usage (legacy 3-source mode):
-    python merge_databases.py atu.json chipex.json colorndrive.json output.json
+    {
+        "manufacturer": "ford",                  # normalised, lowercase
+        "code": "LY3D",                          # uppercase, reliable
+        "name": "Magnetic Grey",                 # best (most common) name
+        "all_names": ["Magnetic Grey", ...],     # every variant seen
+        "normalized_names": ["magnetic grey"],   # for name->code matching
+        "hex": "#5B5E60",                        # canonical hex ("" if none)
+        "color_group": "grey",                   # for VDG disambiguation
+        "models": ["focus", "fiesta", ...],      # from colorndrive (may be [])
+        "sources": ["chipex", "colorndrive"]     # provenance / trust
+    }
 
-    Equivalent to:
-        --source atu=atu.json:year
-        --source chipex=chipex.json:year
-        --source colorndrive=colorndrive.json:noyear
+The hex being a plain column (not a gate) is the whole point: code->name
+must keep codes that have a name but no swatch, which prepare_swatches
+threw away. The name->code direction is derivable by coloureg: invert
+on normalized_names, and where one (make, name) maps to several codes,
+apply a consensus / drop-if-ambiguous policy (the ambiguity counts are
+printed at the end so the split is known up front).
 
-Usage (any number of sources):
-    python merge_databases.py output.json \\
-        --source atu=atu.json:year \\
-        --source chipex=chipex.json:year \\
-        --source colorndrive=colorndrive.json:noyear \\
-        --source vernicispray=vernicispray.json:year \\
-        --source paintman=paintman.json:noyear
+Usage:
+    python merge_databases.py chipex=chipex_full.json \\
+        colorndrive=colorndrive_full.json -o paint_bridge.json
 """
 
-import argparse
 import json
 import re
 import sys
 from collections import Counter, defaultdict
 
 
-# -- Normalization ----------------------------------------------------------
+# -- Manufacturer normalization + cross-source aliases ----------------------
+
+# Aliases are applied AFTER stripping separators, so keys are already
+# normalised. These align the two sources where they name a make
+# differently. Kept deliberately small and evidence-based.
+MANUFACTURER_ALIASES = {
+    "fordeurope": "ford",    # chipex 'Ford' == colorndrive 'Ford Europe' (UK)
+    "bydauto":    "byd",     # chipex 'Byd'  == colorndrive 'Byd Auto'
+    "rovergroup": "rover",   # chipex 'Rover Group' == colorndrive 'Rover'
+    # NOT aliased on purpose (different marque or different market/codes):
+    #   bedford        -> separate truck marque, not Ford
+    #   fordamerica    -> US-market Ford, different codes than UK Ford
+    #   fordaustralia  -> AU-market Ford, different codes than UK Ford
+}
+
+
+def normalize_manufacturer(text):
+    """'Mercedes-Benz' -> 'mercedesbenz', then apply cross-source aliases."""
+    norm = text.strip().lower().replace("-", "").replace(" ", "").replace(".", "")
+    return MANUFACTURER_ALIASES.get(norm, norm)
+
 
 def normalize_model(text):
     """'Id.3', 'Id 3', 'Id-3' all become 'id3'."""
     return text.strip().lower().replace(".", "").replace("-", "").replace(" ", "")
 
 
-def normalize_manufacturer(text):
-    """'Mercedes-Benz' → 'mercedesbenz', 'Volkswagen' → 'volkswagen'."""
-    return text.strip().lower().replace("-", "").replace(" ", "").replace(".", "")
+# -- Colour-name normalization (for the name->code direction) ---------------
+
+# Finish / coat descriptors stripped so the same colour matches across
+# sources that do or don't spell out the finish ('Brilliant Silver' vs
+# 'Brilliant Silver Metallic'). Conservative: over-stripping only ever
+# makes a (make, name) MORE ambiguous, which the consensus policy then
+# drops -- it can never turn a correct fill into a wrong one.
+FINISH_WORDS = {
+    "metallic", "metalic", "met", "metallise", "metalise", "metalizado",
+    "mica", "pearl", "pearlescent", "perl", "perlato", "nacre", "nacré",
+    "effect", "solid", "uni", "gloss", "matt", "matte", "satin",
+    "clearcoat", "tricoat", "tri", "coat",
+}
 
 
-# -- Color classification --------------------------------------------------
+def normalize_color_name(name):
+    """Lowercase, strip punctuation, drop finish words, collapse spaces."""
+    s = name.lower()
+    s = re.sub(r"[^a-z0-9 ]+", " ", s)
+    tokens = [t for t in s.split() if t and t not in FINISH_WORDS]
+    return " ".join(tokens)
+
+
+# -- Colour classification (for VDG colour-group disambiguation) ------------
 
 COLOR_KEYWORDS = {
     "white":  ["white", "weiss", "weis", "bianco", "branco", "blanco",
@@ -80,25 +115,6 @@ COLOR_KEYWORDS = {
     "gold":   ["gold"],
 }
 
-# Used for over-merge detection — broader than COLOR_KEYWORDS so we don't
-# count "silver" and "grey" as different categories
-COLOR_CATEGORIES = {
-    "white":  ["white", "weiss", "weis", "bianco", "branco", "blanco", "blanc"],
-    "black":  ["black", "schwarz", "nero", "preto", "negro", "noir"],
-    "grey":   ["grey", "gray", "grau", "grigio", "cinza", "gris",
-               "silver", "silber", "platinum", "graphite"],
-    "blue":   ["blue", "blau", "blu", "azul", "bleu"],
-    "red":    ["red", "rot", "rosso", "vermelho", "rojo", "rouge"],
-    "green":  ["green", "gruen", "grün", "verde", "vert"],
-    "yellow": ["yellow", "gelb", "giallo", "amarelo", "amarillo", "jaune"],
-    "orange": ["orange", "arancio", "laranja", "naranja"],
-    "brown":  ["brown", "braun", "marrone", "marrom", "sepia",
-               "havanna", "mocca", "mocha"],
-    "purple": ["purple", "violet", "lila", "violett", "roxo"],
-    "beige":  ["beige", "champagne", "sand", "ivory"],
-    "gold":   ["gold"],
-}
-
 
 def classify_color(color_name):
     name_lower = color_name.lower()
@@ -106,16 +122,6 @@ def classify_color(color_name):
         if any(kw in name_lower for kw in keywords):
             return group
     return "other"
-
-
-def count_distinct_color_categories(color_name):
-    """Count distinct basic colour categories in a name. ≥3 = over-merged."""
-    name_lower = color_name.lower()
-    found = set()
-    for category, keywords in COLOR_CATEGORIES.items():
-        if any(kw in name_lower for kw in keywords):
-            found.add(category)
-    return len(found)
 
 
 # -- Hex validation ---------------------------------------------------------
@@ -128,7 +134,7 @@ def is_valid_hex(hex_value):
 
 
 def normalize_hex(hex_value):
-    """Return uppercase canonical hex, or empty string if invalid."""
+    """Uppercase canonical hex, or '' if missing/invalid."""
     if not hex_value:
         return ""
     h = hex_value.strip()
@@ -145,7 +151,7 @@ def is_reliable_code(code, all_codes_in_record=None):
     """Filter dealer shorthand and substring duplicates."""
     if len(code) <= 2:
         return False
-    if len(code) == 4 and code[:2] == code[2:]:
+    if len(code) == 4 and code[:2] == code[2:]:   # 'F1F1' style doubling
         return False
     if all_codes_in_record:
         hyphenated = [c for c in all_codes_in_record if "-" in c]
@@ -155,37 +161,9 @@ def is_reliable_code(code, all_codes_in_record=None):
     return True
 
 
-def parse_all_codes(code_string):
-    return {c.strip().upper() for c in code_string.split(",") if c.strip()}
-
-
 def parse_reliable_codes(code_string):
     all_codes = [c.strip().upper() for c in code_string.split(",") if c.strip()]
     return {c for c in all_codes if is_reliable_code(c, all_codes)}
-
-
-def merge_code_strings(codes_a, codes_b):
-    seen = set()
-    merged = []
-    for code_str in [codes_a, codes_b]:
-        for code in code_str.split(","):
-            code = code.strip()
-            if code and code.upper() not in seen:
-                seen.add(code.upper())
-                merged.append(code)
-    return ", ".join(merged)
-
-
-def is_strong_match(codes_a, codes_b):
-    """≥2 codes overlap OR full subset — prevents over-merge."""
-    if not codes_a or not codes_b:
-        return False
-    overlap = codes_a & codes_b
-    if len(overlap) >= 2:
-        return True
-    if codes_a.issubset(codes_b) or codes_b.issubset(codes_a):
-        return True
-    return False
 
 
 # -- Name helpers -----------------------------------------------------------
@@ -194,22 +172,8 @@ def titlecase_if_upper(name):
     return name.title() if name.isupper() else name
 
 
-def parse_names(name_string):
-    return [titlecase_if_upper(n.strip()) for n in name_string.split(",")
-            if n.strip()]
-
-
-def merge_name_lists(names_a, names_b):
-    seen = set()
-    merged = []
-    for name in names_a + names_b:
-        if name.upper() not in seen:
-            seen.add(name.upper())
-            merged.append(name)
-    return merged
-
-
 def clean_name_string(name_string):
+    """Strip HTML/escaping junk that leaked into a few colorndrive names."""
     if "<" in name_string:
         name_string = re.sub(r"<[^>]*>.*", "", name_string)
         name_string = re.sub(r"[\"']?\)\s*$", "", name_string)
@@ -224,462 +188,181 @@ def clean_name_string(name_string):
     return ", ".join(parts)
 
 
+def parse_names(name_string):
+    cleaned = clean_name_string(name_string)
+    return [titlecase_if_upper(n.strip()) for n in cleaned.split(",") if n.strip()]
+
+
 # -- Source spec parsing ----------------------------------------------------
 
 def parse_source_arg(spec):
-    """
-    Parse a --source flag like 'atu=atu.json:year' into (name, path, has_year).
-    """
+    """'chipex=chipex_full.json' -> ('chipex', 'chipex_full.json')."""
     if "=" not in spec:
-        raise ValueError(
-            f"Invalid --source value '{spec}'. "
-            f"Expected format: name=path[:year|:noyear]"
-        )
-    name, rest = spec.split("=", 1)
-    name = name.strip().lower()
-    if ":" in rest:
-        path, year_flag = rest.rsplit(":", 1)
-        year_flag = year_flag.strip().lower()
-        if year_flag == "year":
-            has_year = True
-        elif year_flag == "noyear":
-            has_year = False
-        else:
-            raise ValueError(
-                f"Invalid year flag '{year_flag}' in '{spec}'. "
-                f"Use ':year' or ':noyear'."
-            )
-    else:
-        path = rest
-        has_year = True  # Default
-    return (name, path.strip(), has_year)
+        raise ValueError(f"Expected 'name=path', got '{spec}'")
+    name, path = spec.split("=", 1)
+    return name.strip(), path.strip()
 
-
-# -- Load -------------------------------------------------------------------
 
 def load_json(filepath):
     with open(filepath, "r", encoding="utf-8") as f:
         return json.load(f)
 
 
-# -- Main merge logic -------------------------------------------------------
+# -- The merge --------------------------------------------------------------
 
-def merge_databases(sources, output_file):
-    """
-    Merge multiple paint databases.
+def build_bridge(sources):
+    """sources: list of (name, records). Returns (output_rows, stats)."""
+    # (mfr, code) -> accumulator
+    bridge = defaultdict(lambda: {
+        "names": Counter(),       # variant -> count (best name + all names)
+        "norm_names": set(),      # normalised variants (name->code)
+        "hexes": Counter(),       # hex -> count (canonical hex)
+        "models": set(),          # models seen (colorndrive)
+        "groups": Counter(),      # colour group -> count
+        "sources": set(),         # provenance
+    })
 
-    sources: list of (name, path, has_year) tuples in priority order
-    output_file: path for the merged JSON
-
-    The first year-aware source is the base; subsequent year-aware sources
-    merge in via strong-match. Year-blind sources are appended after.
-    """
-
-    print(f"Loading {len(sources)} source(s)...")
-    loaded = []
-    for name, path, has_year in sources:
-        data = load_json(path)
-        loaded.append((name, has_year, data))
-        year_label = "year-aware" if has_year else "year-blind"
-        print(f"  {name:18s} ({year_label}) {len(data):>8,} records — {path}")
-
-    year_aware = [(n, d) for (n, hy, d) in loaded if hy]
-    year_blind = [(n, d) for (n, hy, d) in loaded if not hy]
-
-    if not year_aware and not year_blind:
-        print("\nNo sources provided. Nothing to do.")
-        return
-
-    # ── Step 1: Year-aware sources ─────────────────────────────────────
-
-    merged = []
-    group_index = defaultdict(list)
-    model_names = {}
-
-    if not year_aware:
-        print("\n── Step 1: SKIPPED (no year-aware sources) ──")
-    else:
-        primary_name, primary_data = year_aware[0]
-        for record in primary_data:
-            idx = len(merged)
-            entry = {
-                "year": record["year"],
-                "manufacturer": record["manufacturer"],
-                "model": record["model"],
-                "color_name": record["color_name"],
-                "color_codes": record["color_codes"],
-                "color_hex": normalize_hex(record.get("color_hex", "")),
-                "sources": [primary_name],
-            }
-            merged.append(entry)
-
-            norm_mfr = normalize_manufacturer(record["manufacturer"])
-            norm_model = normalize_model(record["model"])
-            group = (record["year"], norm_mfr, norm_model)
-            model_names.setdefault(group, record["model"])
-
-            reliable = parse_reliable_codes(record["color_codes"])
-            group_index[group].append((idx, reliable))
-
-        print(f"\n── Step 1: Year-aware sources ──")
-        print(f"  {primary_name}: {len(primary_data):,} records loaded as base")
-
-        for source_name, source_data in year_aware[1:]:
-            new_count = 0
-            merged_count = 0
-
-            for record in source_data:
-                norm_mfr = normalize_manufacturer(record["manufacturer"])
-                norm_model = normalize_model(record["model"])
-                group = (record["year"], norm_mfr, norm_model)
-                reliable = parse_reliable_codes(record["color_codes"])
-
-                match_idx = None
-                for existing_idx, existing_codes in group_index[group]:
-                    if is_strong_match(reliable, existing_codes):
-                        match_idx = existing_idx
-                        break
-
-                if match_idx is not None:
-                    existing = merged[match_idx]
-                    existing["color_codes"] = merge_code_strings(
-                        existing["color_codes"], record["color_codes"])
-                    existing["color_name"] = ", ".join(merge_name_lists(
-                        parse_names(existing["color_name"]),
-                        parse_names(record["color_name"])))
-                    new_hex = normalize_hex(record.get("color_hex", ""))
-                    if new_hex and not existing["color_hex"]:
-                        existing["color_hex"] = new_hex
-                    if source_name not in existing["sources"]:
-                        existing["sources"].append(source_name)
-                    new_codes = parse_reliable_codes(existing["color_codes"])
-                    for i, (eid, _) in enumerate(group_index[group]):
-                        if eid == match_idx:
-                            group_index[group][i] = (eid, new_codes)
-                            break
-                    merged_count += 1
-                else:
-                    idx = len(merged)
-                    entry = {
-                        "year": record["year"],
-                        "manufacturer": record["manufacturer"],
-                        "model": record["model"],
-                        "color_name": ", ".join(parse_names(record["color_name"])),
-                        "color_codes": record["color_codes"],
-                        "color_hex": normalize_hex(record.get("color_hex", "")),
-                        "sources": [source_name],
-                    }
-                    if group in model_names:
-                        entry["model"] = model_names[group]
-                    merged.append(entry)
-                    group_index[group].append((idx, reliable))
-                    new_count += 1
-
-            print(f"  {source_name}: matched {merged_count:,}, new {new_count:,}")
-
-        print(f"  Records after step 1: {len(merged):,}")
-
-    # ── Step 2: Master hex table (all sources contribute) ──────────────
-
-    hex_votes = defaultdict(list)
-    invalid_hex_count = 0
-
-    for source_name, _, source_data in loaded:
-        for r in source_data:
-            norm_hex = normalize_hex(r.get("color_hex", ""))
-            if not norm_hex:
-                if r.get("color_hex"):
-                    invalid_hex_count += 1
-                continue
-            mfr = normalize_manufacturer(r["manufacturer"])
-            for code in parse_reliable_codes(r["color_codes"]):
-                hex_votes[(mfr, code)].append(norm_hex)
-
-    master_hex = {
-        key: Counter(votes).most_common(1)[0][0]
-        for key, votes in hex_votes.items()
+    stats = {
+        "per_source": {},
+        "skipped_no_mfr": 0,
+        "skipped_no_code": 0,
+        "records_used": 0,
     }
 
-    print(f"\n── Step 2: Master hex table ──")
-    print(f"  Entries: {len(master_hex):,}")
-    print(f"  Invalid hex values dropped: {invalid_hex_count:,}")
+    for name, records in sources:
+        used = 0
+        for r in records:
+            mfr = normalize_manufacturer(r.get("manufacturer", ""))
+            if not mfr:
+                stats["skipped_no_mfr"] += 1
+                continue
+            codes = parse_reliable_codes(r.get("color_codes", ""))
+            if not codes:
+                stats["skipped_no_code"] += 1
+                continue
 
-    # ── Step 3: Master name table (all sources contribute) ─────────────
-
-    master_names = defaultdict(list)
-    for _, _, source_data in loaded:
-        for r in source_data:
-            mfr = normalize_manufacturer(r["manufacturer"])
             names = parse_names(r.get("color_name", ""))
-            for code in parse_reliable_codes(r.get("color_codes", "")):
-                master_names[(mfr, code)].extend(names)
+            hexv = normalize_hex(r.get("color_hex", ""))
+            model = normalize_model(r.get("model", "")) if r.get("model") else None
+            group = classify_color(r.get("color_name", "")) if names else "other"
+            norms = {normalize_color_name(n) for n in names}
+            norms.discard("")
 
-    for key in master_names:
-        seen = set()
-        deduped = []
-        for name in master_names[key]:
-            if name.upper() not in seen:
-                seen.add(name.upper())
-                deduped.append(name)
-        master_names[key] = deduped
+            for code in codes:
+                entry = bridge[(mfr, code)]
+                for n in names:
+                    entry["names"][n] += 1
+                entry["norm_names"].update(norms)
+                if hexv:
+                    entry["hexes"][hexv] += 1
+                if model:
+                    entry["models"].add(model)
+                entry["groups"][group] += 1
+                entry["sources"].add(name)
+            used += 1
 
-    print(f"\n── Step 3: Master name table ──")
-    print(f"  Entries: {len(master_names):,}")
+        stats["per_source"][name] = used
+        stats["records_used"] += used
 
-    # ── Step 4: Apply hex and names to year-aware records ──────────────
+    # Build output rows
+    rows = []
+    stats["multi_hex_codes"] = 0
+    for (mfr, code), e in bridge.items():
+        best_name = e["names"].most_common(1)[0][0] if e["names"] else ""
+        all_names = [n for n, _ in e["names"].most_common()]
+        canonical_hex = e["hexes"].most_common(1)[0][0] if e["hexes"] else ""
+        if len(e["hexes"]) > 1:
+            stats["multi_hex_codes"] += 1
+        group = e["groups"].most_common(1)[0][0] if e["groups"] else "other"
+        rows.append({
+            "manufacturer": mfr,
+            "code": code,
+            "name": best_name,
+            "all_names": all_names,
+            "normalized_names": sorted(e["norm_names"]),
+            "hex": canonical_hex,
+            "color_group": group,
+            "models": sorted(e["models"]),
+            "sources": sorted(e["sources"]),
+        })
 
-    hex_filled = 0
-    names_enriched = 0
+    rows.sort(key=lambda x: (x["manufacturer"], x["code"]))
+    return rows, stats
 
-    for record in merged:
-        mfr = normalize_manufacturer(record["manufacturer"])
-        reliable = parse_reliable_codes(record["color_codes"])
 
-        if not record["color_hex"]:
-            for code in reliable:
-                if (mfr, code) in master_hex:
-                    record["color_hex"] = master_hex[(mfr, code)]
-                    hex_filled += 1
-                    break
+def print_stats(rows, stats):
+    print("\n── Inputs ──")
+    for name, n in stats["per_source"].items():
+        print(f"  {name:14s} {n:>8,} records used")
+    print(f"  skipped (no manufacturer): {stats['skipped_no_mfr']:,}")
+    print(f"  skipped (no reliable code): {stats['skipped_no_code']:,}")
 
-        current_names = parse_names(record["color_name"])
-        all_names = list(current_names)
-        for code in reliable:
-            if (mfr, code) in master_names:
-                all_names = merge_name_lists(all_names, master_names[(mfr, code)])
+    print("\n── Bridge table ──")
+    print(f"  unique (make, code) rows:  {len(rows):,}")
+    with_hex = sum(1 for r in rows if r["hex"])
+    print(f"  with hex (swatch):         {with_hex:,} ({with_hex/len(rows)*100:.1f}%)")
+    print(f"  without hex (name-only):   {len(rows)-with_hex:,}  "
+          f"<- these are what prepare_swatches dropped")
 
-        if len(all_names) > len(current_names):
-            names_enriched += 1
-        record["color_name"] = ", ".join(all_names)
+    # provenance
+    prov = Counter(" + ".join(r["sources"]) for r in rows)
+    print("\n  provenance:")
+    for combo, n in prov.most_common():
+        print(f"    {combo:24s} {n:>8,} ({n/len(rows)*100:.1f}%)")
 
-    print(f"\n── Step 4: Apply hex and names ──")
-    print(f"  Records given hex:      {hex_filled:,}")
-    print(f"  Records enriched names: {names_enriched:,}")
+    # code -> name is clean by construction (one row per code). Report the
+    # name -> code direction, which is where ambiguity lives.
+    name_to_codes = defaultdict(set)
+    for r in rows:
+        for nn in r["normalized_names"]:
+            name_to_codes[(r["manufacturer"], nn)].add(r["code"])
+    counts = Counter(len(v) for v in name_to_codes.values())
+    total_names = len(name_to_codes)
+    single = counts.get(1, 0)
+    multi = total_names - single
+    print("\n  name -> code direction:")
+    print(f"    distinct (make, name) keys: {total_names:,}")
+    print(f"    -> exactly 1 code (clean):  {single:,} ({single/total_names*100:.1f}%)")
+    print(f"    -> 2+ codes (needs policy): {multi:,} ({multi/total_names*100:.1f}%)")
 
-    # ── Step 5: Add year-blind source records ──────────────────────────
+    print("\n  swatch quality:")
+    mh = stats.get("multi_hex_codes", 0)
+    print(f"    codes with >1 distinct hex: {mh:,} "
+          f"({mh/len(rows)*100:.1f}%) -- canonical = most common")
 
-    existing_keys = set()
-    for record in merged:
-        mfr = normalize_manufacturer(record["manufacturer"])
-        model = normalize_model(record["model"])
-        for code in parse_reliable_codes(record["color_codes"]):
-            existing_keys.add((mfr, model, code))
 
-    print(f"\n── Step 5: Year-blind sources ──")
-    if not year_blind:
-        print(f"  (no year-blind sources)")
-    else:
-        for source_name, source_data in year_blind:
-            new_count = 0
-            skipped_empty = 0
-            skipped_dupe = 0
-            seen_in_source = set()
+def main():
+    args = sys.argv[1:]
+    if "-o" not in args:
+        print("Usage: python merge_databases.py name=path [name=path ...] -o output.json")
+        sys.exit(1)
+    oi = args.index("-o")
+    output_file = args[oi + 1]
+    specs = args[:oi] + args[oi + 2:]
+    if not specs:
+        print("No sources given.")
+        sys.exit(1)
 
-            for r in source_data:
-                codes_raw = r.get("color_codes", "").strip()
-                if not codes_raw:
-                    skipped_empty += 1
-                    continue
+    sources = []
+    for spec in specs:
+        name, path = parse_source_arg(spec)
+        data = load_json(path)
+        print(f"loaded {name:14s} {len(data):>8,} records  ({path})")
+        sources.append((name, data))
 
-                mfr = normalize_manufacturer(r["manufacturer"])
-                model = normalize_model(r["model"])
-                reliable = parse_reliable_codes(codes_raw)
-
-                if not reliable:
-                    skipped_empty += 1
-                    continue
-
-                source_key = (mfr, model, frozenset(reliable))
-                if source_key in seen_in_source:
-                    skipped_dupe += 1
-                    continue
-                seen_in_source.add(source_key)
-
-                already_exists = any(
-                    (mfr, model, code) in existing_keys for code in reliable)
-                if already_exists:
-                    continue
-
-                hex_val = normalize_hex(r.get("color_hex", ""))
-                if not hex_val:
-                    for code in reliable:
-                        if (mfr, code) in master_hex:
-                            hex_val = master_hex[(mfr, code)]
-                            break
-
-                names = parse_names(r.get("color_name", ""))
-                for code in reliable:
-                    if (mfr, code) in master_names:
-                        names = merge_name_lists(names, master_names[(mfr, code)])
-
-                entry = {
-                    "year": None,
-                    "manufacturer": r["manufacturer"],
-                    "model": r["model"],
-                    "color_name": ", ".join(names),
-                    "color_codes": codes_raw,
-                    "color_hex": hex_val,
-                    "sources": [source_name],
-                }
-                merged.append(entry)
-                for code in reliable:
-                    existing_keys.add((mfr, model, code))
-                new_count += 1
-
-            print(f"  {source_name}: new {new_count:,}, "
-                  f"skipped empty {skipped_empty:,}, "
-                  f"dupes {skipped_dupe:,}")
-
-    # ── Step 6: Tag year-blind sources on existing records ─────────────
-
-    if year_blind:
-        # Build an index from (mfr, model, code) → record once,
-        # so each CND record can find its match in O(1) instead of O(N).
-        # A single record can be reachable via multiple codes, but we only
-        # need to tag it once; storing the record reference is fine.
-        record_by_code_key = {}
-        for record in merged:
-            mfr = normalize_manufacturer(record["manufacturer"])
-            model = normalize_model(record["model"])
-            for code in parse_reliable_codes(record["color_codes"]):
-                # First record wins for a given key (matches old "break" behaviour)
-                key = (mfr, model, code)
-                if key not in record_by_code_key:
-                    record_by_code_key[key] = record
-
-        for source_name, source_data in year_blind:
-            tagged = 0
-            for r in source_data:
-                codes_raw = r.get("color_codes", "").strip()
-                if not codes_raw:
-                    continue
-                mfr = normalize_manufacturer(r["manufacturer"])
-                model = normalize_model(r["model"])
-                reliable = parse_reliable_codes(codes_raw)
-                if not reliable:
-                    continue
-                # Look for ANY matching code; tag the first hit
-                for code in reliable:
-                    record = record_by_code_key.get((mfr, model, code))
-                    if record is not None:
-                        if source_name not in record["sources"]:
-                            record["sources"].append(source_name)
-                            tagged += 1
-                        break
-            print(f"  Step 6: tagged {tagged:,} existing records with '{source_name}'")
-
-    # ── Step 7: Classify, clean, dedupe ────────────────────────────────
-
-    seen_records = set()
-    unique = []
-    dupes_removed = 0
-    over_merged_dropped = 0
-
-    for record in merged:
-        record["color_name"] = clean_name_string(record["color_name"])
-
-        if count_distinct_color_categories(record["color_name"]) >= 3:
-            over_merged_dropped += 1
-            continue
-
-        record["normalized_manufacturer"] = normalize_manufacturer(
-            record["manufacturer"])
-        record["normalized_model"] = normalize_model(record["model"])
-        record["color_group"] = classify_color(record["color_name"])
-
-        dedup = (
-            record["year"],
-            record["normalized_manufacturer"],
-            record["normalized_model"],
-            frozenset(parse_all_codes(record["color_codes"])),
-        )
-
-        if dedup not in seen_records:
-            seen_records.add(dedup)
-            unique.append(record)
-        else:
-            dupes_removed += 1
-
-    result = sorted(
-        unique,
-        key=lambda r: (
-            r["year"] if r["year"] is not None else 9999,
-            r["manufacturer"], r["model"], r["color_name"],
-        ),
-    )
-
-    hex_count = sum(1 for r in result if r["color_hex"])
-
-    print(f"\n── Step 7: Clean & deduplicate ──")
-    print(f"  Duplicates removed:  {dupes_removed:,}")
-    print(f"  Over-merged dropped: {over_merged_dropped:,}")
+    rows, stats = build_bridge(sources)
+    print_stats(rows, stats)
 
     with open(output_file, "w", encoding="utf-8") as f:
         f.write("[\n")
-        for i, record in enumerate(result):
-            line = json.dumps(record, ensure_ascii=False)
-            comma = "," if i < len(result) - 1 else ""
+        for i, r in enumerate(rows):
+            line = json.dumps(r, ensure_ascii=False, sort_keys=True)
+            comma = "," if i < len(rows) - 1 else ""
             f.write(f"{line}{comma}\n")
         f.write("]\n")
-
-    source_counts = Counter()
-    for r in result:
-        source_counts[",".join(sorted(r["sources"]))] += 1
-
-    print(f"\n{'=' * 50}")
-    print(f"  Total records:      {len(result):,}")
-    print(f"  With hex:           {hex_count:,} ({hex_count/len(result)*100:.1f}%)")
-    print(f"  Without hex:        {len(result)-hex_count:,} "
-          f"({(len(result)-hex_count)/len(result)*100:.1f}%)")
-    print(f"\n  Source distribution:")
-    for source_combo, count in source_counts.most_common():
-        print(f"    {source_combo:30s} {count:>8,}")
-    print(f"\n  Saved to: {output_file}")
-
-
-# -- CLI --------------------------------------------------------------------
-
-def main():
-    # Backwards compat: legacy 4-positional-args invocation
-    # python merge_databases.py atu.json chipex.json colorndrive.json out.json
-    if (len(sys.argv) == 5
-            and not any(a.startswith("--") for a in sys.argv[1:])):
-        sources = [
-            ('atu',         sys.argv[1], True),
-            ('chipex',      sys.argv[2], True),
-            ('colorndrive', sys.argv[3], False),
-        ]
-        merge_databases(sources, sys.argv[4])
-        return
-
-    parser = argparse.ArgumentParser(
-        description="Merge any number of paint colour databases.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  python merge_databases.py atu.json chipex.json "
-            "colorndrive.json out.json\n"
-            "    (legacy 3-source mode)\n\n"
-            "  python merge_databases.py out.json \\\n"
-            "      --source atu=atu.json:year \\\n"
-            "      --source chipex=chipex.json:year \\\n"
-            "      --source colorndrive=colorndrive.json:noyear \\\n"
-            "      --source vernicispray=vernicispray.json:year\n"
-            "    (any number of sources, year-aware or not)\n\n"
-            "Source format: name=path[:year|:noyear]\n"
-            "  ':year'   — records have year info (default if omitted)\n"
-            "  ':noyear' — records have no year info"
-        ),
-    )
-    parser.add_argument("output", help="Output JSON path")
-    parser.add_argument(
-        "--source", action="append", required=True,
-        help="Source spec: 'name=path[:year|:noyear]'. Repeat for each source.",
-    )
-    args = parser.parse_args()
-
-    sources = [parse_source_arg(s) for s in args.source]
-    merge_databases(sources, args.output)
+    import os
+    print(f"\nWrote {len(rows):,} rows to {output_file} "
+          f"({os.path.getsize(output_file)/1024/1024:.1f} MB)")
 
 
 if __name__ == "__main__":
