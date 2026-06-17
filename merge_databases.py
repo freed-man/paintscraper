@@ -162,7 +162,23 @@ def is_reliable_code(code, all_codes_in_record=None):
 
 
 def parse_reliable_codes(code_string):
-    all_codes = [c.strip().upper() for c in code_string.split(",") if c.strip()]
+    """Reliable paint codes from a record's code string.
+
+    Codes are matched EXACTLY -- uppercased and whitespace-trimmed only,
+    and deliberately NOT stripped of internal punctuation. That punctuation
+    is frequently semantic: Renault encodes a matt finish in a dot
+    ('220.116' matt vs '220116' gloss), and dashes mark shade variants
+    elsewhere. Stripping it fuses genuinely different paints into one row,
+    so exact matching is the safe, correct behaviour -- verified against the
+    real data, where every stripping rule introduced false merges. Do NOT
+    "optimise" this by stripping dots / dashes / spaces from codes.
+
+    Split on both ',' and ';': chipex joins multi-codes with ',', but a
+    stray ';' separator occasionally leaks through and must not survive as
+    a junk code like '6;V'.
+    """
+    raw = re.split(r"[,;]", code_string)
+    all_codes = [c.strip().upper() for c in raw if c.strip()]
     return {c for c in all_codes if is_reliable_code(c, all_codes)}
 
 
@@ -227,24 +243,30 @@ def build_bridge(sources):
         "skipped_no_mfr": 0,
         "skipped_no_code": 0,
         "records_used": 0,
+        "alias_hits": Counter(),
     }
 
     for name, records in sources:
         used = 0
         for r in records:
-            mfr = normalize_manufacturer(r.get("manufacturer", ""))
+            raw_mfr = str(r.get("manufacturer") or "")
+            mfr = normalize_manufacturer(raw_mfr)
             if not mfr:
                 stats["skipped_no_mfr"] += 1
                 continue
-            codes = parse_reliable_codes(r.get("color_codes", ""))
+            if re.sub(r"[-. ]", "", raw_mfr.strip().lower()) in MANUFACTURER_ALIASES:
+                stats["alias_hits"][mfr] += 1
+
+            color_name = str(r.get("color_name") or "")
+            codes = parse_reliable_codes(str(r.get("color_codes") or ""))
             if not codes:
                 stats["skipped_no_code"] += 1
                 continue
 
-            names = parse_names(r.get("color_name", ""))
-            hexv = normalize_hex(r.get("color_hex", ""))
-            model = normalize_model(r.get("model", "")) if r.get("model") else None
-            group = classify_color(r.get("color_name", "")) if names else "other"
+            names = parse_names(color_name)
+            hexv = normalize_hex(str(r.get("color_hex") or ""))
+            model = normalize_model(str(r.get("model") or "")) if r.get("model") else None
+            group = classify_color(color_name) if names else "other"
             norms = {normalize_color_name(n) for n in names}
             norms.discard("")
 
@@ -296,9 +318,13 @@ def print_stats(rows, stats):
         print(f"  {name:14s} {n:>8,} records used")
     print(f"  skipped (no manufacturer): {stats['skipped_no_mfr']:,}")
     print(f"  skipped (no reliable code): {stats['skipped_no_code']:,}")
+    if stats.get("alias_hits"):
+        hits = ", ".join(f"{m} ({n:,})" for m, n in stats["alias_hits"].most_common())
+        print(f"  make aliases applied:      {hits}")
 
     print("\n── Bridge table ──")
-    print(f"  unique (make, code) rows:  {len(rows):,}")
+    makes = len(set(r["manufacturer"] for r in rows))
+    print(f"  unique (make, code) rows:  {len(rows):,}  across {makes} makes")
     with_hex = sum(1 for r in rows if r["hex"])
     print(f"  with hex (swatch):         {with_hex:,} ({with_hex/len(rows)*100:.1f}%)")
     print(f"  without hex (name-only):   {len(rows)-with_hex:,}  "
