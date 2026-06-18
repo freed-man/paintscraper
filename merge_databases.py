@@ -1,5 +1,5 @@
 """
-Build the consolidated paint bridge table from the scraper outputs.
+Build the consolidated paint lookup table from the scraper outputs.
 
 This replaces the old year-aware merge AND prepare_swatches.py. Both
 chipex (make-level) and colorndrive (model-level) are now year-blind, so
@@ -33,7 +33,7 @@ printed at the end so the split is known up front).
 
 Usage:
     python merge_databases.py chipex=chipex_full.json \\
-        colorndrive=colorndrive_full.json -o paint_bridge.json
+        colorndrive=colorndrive_full.json -o paint_lookup.json
 """
 
 import json
@@ -226,10 +226,10 @@ def load_json(filepath):
 
 # -- The merge --------------------------------------------------------------
 
-def build_bridge(sources):
+def build_lookup(sources):
     """sources: list of (name, records). Returns (output_rows, stats)."""
     # (mfr, code) -> accumulator
-    bridge = defaultdict(lambda: {
+    lookup = defaultdict(lambda: {
         "names": Counter(),       # variant -> count (best name + all names)
         "norm_names": set(),      # normalised variants (name->code)
         "hexes": Counter(),       # hex -> count (canonical hex)
@@ -271,7 +271,7 @@ def build_bridge(sources):
             norms.discard("")
 
             for code in codes:
-                entry = bridge[(mfr, code)]
+                entry = lookup[(mfr, code)]
                 for n in names:
                     entry["names"][n] += 1
                 entry["norm_names"].update(norms)
@@ -289,7 +289,7 @@ def build_bridge(sources):
     # Build output rows
     rows = []
     stats["multi_hex_codes"] = 0
-    for (mfr, code), e in bridge.items():
+    for (mfr, code), e in lookup.items():
         best_name = e["names"].most_common(1)[0][0] if e["names"] else ""
         all_names = [n for n, _ in e["names"].most_common()]
         canonical_hex = e["hexes"].most_common(1)[0][0] if e["hexes"] else ""
@@ -322,7 +322,7 @@ def print_stats(rows, stats):
         hits = ", ".join(f"{m} ({n:,})" for m, n in stats["alias_hits"].most_common())
         print(f"  make aliases applied:      {hits}")
 
-    print("\n── Bridge table ──")
+    print("\n── Lookup table ──")
     makes = len(set(r["manufacturer"] for r in rows))
     print(f"  unique (make, code) rows:  {len(rows):,}  across {makes} makes")
     with_hex = sum(1 for r in rows if r["hex"])
@@ -357,16 +357,21 @@ def print_stats(rows, stats):
           f"({mh/len(rows)*100:.1f}%) -- canonical = most common")
 
 
+DEFAULT_OUTPUT = "paint_lookup.json"
+
+
 def main():
     args = sys.argv[1:]
-    if "-o" not in args:
-        print("Usage: python merge_databases.py name=path [name=path ...] -o output.json")
-        sys.exit(1)
-    oi = args.index("-o")
-    output_file = args[oi + 1]
-    specs = args[:oi] + args[oi + 2:]
+    if "-o" in args:
+        oi = args.index("-o")
+        output_file = args[oi + 1]
+        specs = args[:oi] + args[oi + 2:]
+    else:
+        output_file = DEFAULT_OUTPUT
+        specs = args
     if not specs:
-        print("No sources given.")
+        print("Usage: python merge_databases.py name=path [name=path ...] [-o output.json]")
+        print(f"       output defaults to {DEFAULT_OUTPUT}")
         sys.exit(1)
 
     sources = []
@@ -376,7 +381,7 @@ def main():
         print(f"loaded {name:14s} {len(data):>8,} records  ({path})")
         sources.append((name, data))
 
-    rows, stats = build_bridge(sources)
+    rows, stats = build_lookup(sources)
     print_stats(rows, stats)
 
     with open(output_file, "w", encoding="utf-8") as f:
