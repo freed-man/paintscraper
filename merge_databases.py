@@ -245,6 +245,20 @@ def load_json(filepath):
 
 # -- The merge --------------------------------------------------------------
 
+def top(counter, default=""):
+    """Most-common value, ties broken alphabetically.
+
+    Counter.most_common() breaks ties by insertion order, which depends on
+    the order sources are passed and rows appear in each file -- so the same
+    inputs could yield a different 'name'/'hex'/'color_group' on re-run or
+    arg reorder. Sorting by (-count, key) makes the choice deterministic, to
+    match the already-sorted models/sources/normalized_names fields.
+    """
+    if not counter:
+        return default
+    return min(counter.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+
 def build_lookup(sources):
     """sources: list of (name, records). Returns (output_rows, stats)."""
     # (mfr, code) -> accumulator
@@ -309,12 +323,13 @@ def build_lookup(sources):
     rows = []
     stats["multi_hex_codes"] = 0
     for (mfr, code), e in lookup.items():
-        best_name = e["names"].most_common(1)[0][0] if e["names"] else ""
-        all_names = [n for n, _ in e["names"].most_common()]
-        canonical_hex = e["hexes"].most_common(1)[0][0] if e["hexes"] else ""
+        best_name = top(e["names"])
+        all_names = [n for n, _ in sorted(e["names"].items(),
+                                          key=lambda kv: (-kv[1], kv[0]))]
+        canonical_hex = top(e["hexes"])
         if len(e["hexes"]) > 1:
             stats["multi_hex_codes"] += 1
-        group = e["groups"].most_common(1)[0][0] if e["groups"] else "other"
+        group = top(e["groups"], "other")
         rows.append({
             "manufacturer": mfr,
             "code": code,
