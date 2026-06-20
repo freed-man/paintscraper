@@ -39,6 +39,7 @@ Usage:
 import json
 import re
 import sys
+import unicodedata
 from collections import Counter, defaultdict
 
 
@@ -104,8 +105,17 @@ FINISH_WORDS = {
 
 
 def normalize_color_name(name):
-    """Lowercase, strip punctuation, drop finish words, collapse spaces."""
-    s = name.lower()
+    """Lowercase, fold accents, strip punctuation, drop finish words, collapse.
+
+    Accents are folded to ASCII first (NFKD, then drop combining marks) so
+    'Crème'/'Creme' -- and 'Métallisé'/'Metallise' -- normalise to the same
+    thing instead of fragmenting into junk tokens ('cr me', 'm tallis') at
+    the punctuation strip below. Without this an accented name and its plain
+    twin never cross-match in the name->code direction, and accented finish
+    words slip past FINISH_WORDS.
+    """
+    s = unicodedata.normalize("NFKD", name.lower())
+    s = "".join(c for c in s if not unicodedata.combining(c))
     s = re.sub(r"[^a-z0-9 ]+", " ", s)
     tokens = [t for t in s.split() if t and t not in FINISH_WORDS]
     return " ".join(tokens)
@@ -357,6 +367,9 @@ def print_stats(rows, stats):
         print(f"  make aliases applied:      {hits}")
 
     print("\n── Lookup table ──")
+    if not rows:
+        print("  no output rows produced -- check the input files have data")
+        return
     makes = len(set(r["manufacturer"] for r in rows))
     print(f"  unique (make, code) rows:  {len(rows):,}  across {makes} makes")
     with_hex = sum(1 for r in rows if r["hex"])
@@ -380,10 +393,11 @@ def print_stats(rows, stats):
     total_names = len(name_to_codes)
     single = counts.get(1, 0)
     multi = total_names - single
+    denom = total_names or 1   # rows>0 here, but defend the no-names case
     print("\n  name -> code direction:")
     print(f"    distinct (make, name) keys: {total_names:,}")
-    print(f"    -> exactly 1 code (clean):  {single:,} ({single/total_names*100:.1f}%)")
-    print(f"    -> 2+ codes (needs policy): {multi:,} ({multi/total_names*100:.1f}%)")
+    print(f"    -> exactly 1 code (clean):  {single:,} ({single/denom*100:.1f}%)")
+    print(f"    -> 2+ codes (needs policy): {multi:,} ({multi/denom*100:.1f}%)")
 
     print("\n  swatch quality:")
     mh = stats.get("multi_hex_codes", 0)
