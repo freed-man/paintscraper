@@ -45,16 +45,35 @@ from collections import Counter, defaultdict
 # -- Manufacturer normalization + cross-source aliases ----------------------
 
 # Aliases are applied AFTER stripping separators, so keys are already
-# normalised. These align the two sources where they name a make
-# differently. Kept deliberately small and evidence-based.
+# normalised. These align the sources where they name a make differently.
+# Kept deliberately small and evidence-based.
 MANUFACTURER_ALIASES = {
+    # chipex / colorndrive
     "fordeurope": "ford",    # chipex 'Ford' == colorndrive 'Ford Europe' (UK)
     "bydauto":    "byd",     # chipex 'Byd'  == colorndrive 'Byd Auto'
     "rovergroup": "rover",   # chipex 'Rover Group' == colorndrive 'Rover'
+
+    # peinturevoiture verbose / historical names -> existing make (same marque)
+    "tatamotors":        "tata",
+    "cheryautomobile":   "chery",
+    "changanautomobile": "changan",
+    "samsungmotors":     "samsung",
+    "mahindra&mahindra": "mahindra",
+    "polestarracing":    "polestar",
+    "ineosautomotive":   "ineos",
+    "jacmotors":         "jac",
+    "scaniavabis":       "scania",     # historical Scania (commercial)
+    "hanomaghenschel":   "hanomag",    # commercial
+
     # NOT aliased on purpose (different marque or different market/codes):
     #   bedford        -> separate truck marque, not Ford
     #   fordamerica    -> US-market Ford, different codes than UK Ford
     #   fordaustralia  -> AU-market Ford, different codes than UK Ford
+    #   ford(usa)      -> peinturevoiture US Ford; would be fordamerica, NOT ford
+    # peinturevoiture combined buckets spanning two real marques are left as
+    # their own single-source rows rather than mislabelled onto one side:
+    #   chrysler/jeep, ferrari-maserati, amc-jeep, zastava-yugo, omoda-jaecoo,
+    #   blmc-rover (British-Leyland shared-code bucket; no clean single make)
 }
 
 
