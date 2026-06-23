@@ -53,6 +53,8 @@ MANUFACTURER_ALIASES = {
     "fordeurope": "ford",    # chipex 'Ford' == colorndrive 'Ford Europe' (UK)
     "bydauto":    "byd",     # chipex 'Byd'  == colorndrive 'Byd Auto'
     "rovergroup": "rover",   # chipex 'Rover Group' == colorndrive 'Rover'
+    "rangerover": "landrover",  # Range Rover is a Land Rover model line -- provably
+                                # identical codes + hex (820/PAB/1AG/2103, #111112)
 
     # peinturevoiture verbose / historical names -> existing make (same marque)
     "tatamotors":        "tata",
@@ -190,6 +192,25 @@ def is_reliable_code(code, all_codes_in_record=None):
     return True
 
 
+def is_composite_crossref(code):
+    """colorndrive JLR composite cross-ref codes -- several equivalent codes
+    mashed into one string, e.g. 'JLRC820 PAB 2103', 'JLRCPAB', 'LRC820 - 1AG'.
+    These never match a real door-sticker code and the clean underlying codes
+    (PAB, 820, 1AG...) are already present from other rows, so they are pure
+    clutter and could otherwise surface as an ugly answer on a tie.
+
+    Scoped tightly to the JLRC/LRC prefix so it can't touch legitimate spaced
+    codes elsewhere (e.g. Citroen 'AC 126'). Clean LRC singles like
+    'LRC797-PBF' (no space) are KEPT -- they can be a distinct colour.
+    """
+    cu = code.upper().strip()
+    if cu.startswith("JLRC"):
+        return True
+    if cu.startswith("LRC") and " " in code:
+        return True
+    return False
+
+
 def parse_reliable_codes(code_string):
     """Reliable paint codes from a record's code string.
 
@@ -208,7 +229,8 @@ def parse_reliable_codes(code_string):
     """
     raw = re.split(r"[,;]", code_string)
     all_codes = [c.strip().upper() for c in raw if c.strip()]
-    return {c for c in all_codes if is_reliable_code(c, all_codes)}
+    return {c for c in all_codes
+            if is_reliable_code(c, all_codes) and not is_composite_crossref(c)}
 
 
 # -- Name helpers -----------------------------------------------------------
