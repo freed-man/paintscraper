@@ -178,10 +178,25 @@ def normalize_hex(hex_value):
 
 # -- Code helpers -----------------------------------------------------------
 
-def is_reliable_code(code, all_codes_in_record=None):
-    """Filter dealer shorthand and substring duplicates."""
+def is_reliable_code(code, all_codes_in_record=None, mfr=None,
+                     unambiguous_short=None):
+    """Filter dealer shorthand and substring duplicates.
+
+    Short codes (<=2 chars) are dropped by default: a 2-char token is usually
+    dealer shorthand and collides across many colours within a make. The one
+    exception -- a (make, short-code) pair that maps to exactly ONE colour
+    across the whole corpus is a genuine manufacturer code (Ford 'MA', Citroen
+    'H6', Dodge 'D3', Lincoln 'XB') and is recovered. That unambiguous set is
+    computed up front by compute_unambiguous_short() and threaded in here.
+    If it isn't supplied, the old conservative behaviour (drop every <=2) is
+    preserved exactly -- so every existing caller is unaffected.
+    """
     if len(code) <= 2:
-        return False
+        if not (unambiguous_short and mfr is not None
+                and (mfr, code) in unambiguous_short):
+            return False
+        # recovered: a single-colour short code, still subject to the
+        # substring-of-hyphenated check below (it can still be a fragment).
     if len(code) == 4 and code[:2] == code[2:]:   # 'F1F1' style doubling
         return False
     if all_codes_in_record:
@@ -211,7 +226,7 @@ def is_composite_crossref(code):
     return False
 
 
-def parse_reliable_codes(code_string):
+def parse_reliable_codes(code_string, mfr=None, unambiguous_short=None):
     """Reliable paint codes from a record's code string.
 
     Codes are matched EXACTLY -- uppercased and whitespace-trimmed only,
@@ -230,7 +245,8 @@ def parse_reliable_codes(code_string):
     raw = re.split(r"[,;]", code_string)
     all_codes = [c.strip().upper() for c in raw if c.strip()]
     return {c for c in all_codes
-            if is_reliable_code(c, all_codes) and not is_composite_crossref(c)}
+            if is_reliable_code(c, all_codes, mfr, unambiguous_short)
+            and not is_composite_crossref(c)}
 
 
 # -- Name helpers -----------------------------------------------------------
@@ -291,8 +307,55 @@ def top(counter, default=""):
     return min(counter.items(), key=lambda kv: (-kv[1], kv[0]))[0]
 
 
+def _strict_color_id(name):
+    """Conservative colour identity for the short-code ambiguity test.
+
+    Lowercase, keep alphanumerics + spaces, collapse runs of whitespace. This
+    deliberately does NOT strip finish words the way normalize_color_name does:
+    a short code is treated as unambiguous only when its colour is genuinely
+    consistent, never by folding 'X Metallic' and 'X Pearl' into one identity.
+    Erring strict means a borderline short code is dropped, not mis-recovered.
+    """
+    return re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 ]", " ", name.lower())).strip()
+
+
+def compute_unambiguous_short(sources):
+    """Pre-pass: the set of (mfr, code) where code is <=2 chars and maps to
+    exactly one colour across the entire corpus.
+
+    These are the short manufacturer codes safe to recover past the default
+    <=2 drop -- e.g. Ford 'MA' is always Light Crystal Blue Metallic, so it
+    identifies a colour as reliably as any longer code. A short code naming
+    two or more different colours within a make stays dropped: that collision
+    is the whole reason the blunt filter exists.
+    """
+    short_colours = defaultdict(set)
+    for _name, records in sources:
+        for r in records:
+            mfr = normalize_manufacturer(str(r.get("manufacturer") or ""))
+            if not mfr:
+                continue
+            raw = re.split(r"[,;]", str(r.get("color_codes") or ""))
+            codes = [c.strip().upper() for c in raw if c.strip()]
+            shorts = [c for c in codes
+                      if len(c) <= 2 and not is_composite_crossref(c)]
+            if not shorts:
+                continue
+            ids = {_strict_color_id(n)
+                   for n in parse_names(str(r.get("color_name") or ""))}
+            ids.discard("")
+            if not ids:
+                continue
+            for c in shorts:
+                short_colours[(mfr, c)].update(ids)
+    return {key for key, ids in short_colours.items() if len(ids) == 1}
+
+
 def build_lookup(sources):
     """sources: list of (name, records). Returns (output_rows, stats)."""
+    # Short manufacturer codes (<=2 chars) that unambiguously name one colour
+    # within their make are recovered past the default drop; computed once.
+    unambiguous_short = compute_unambiguous_short(sources)
     # (mfr, code) -> accumulator
     lookup = defaultdict(lambda: {
         "names": Counter(),       # variant -> count (best name + all names)
@@ -323,7 +386,8 @@ def build_lookup(sources):
                 stats["alias_hits"][mfr] += 1
 
             color_name = str(r.get("color_name") or "")
-            codes = parse_reliable_codes(str(r.get("color_codes") or ""))
+            codes = parse_reliable_codes(str(r.get("color_codes") or ""),
+                                         mfr, unambiguous_short)
             if not codes:
                 stats["skipped_no_code"] += 1
                 continue
@@ -375,6 +439,7 @@ def build_lookup(sources):
         })
 
     rows.sort(key=lambda x: (x["manufacturer"], x["code"]))
+    stats["short_code_rows"] = sum(1 for r in rows if len(r["code"]) <= 2)
     return rows, stats
 
 
@@ -384,6 +449,9 @@ def print_stats(rows, stats):
         print(f"  {name:14s} {n:>8,} records used")
     print(f"  skipped (no manufacturer): {stats['skipped_no_mfr']:,}")
     print(f"  skipped (no reliable code): {stats['skipped_no_code']:,}")
+    if stats.get("short_code_rows"):
+        print(f"  recovered short codes:     {stats['short_code_rows']:,} "
+              f"(<=2 chars, unambiguous within make)")
     if stats.get("alias_hits"):
         hits = ", ".join(f"{m} ({n:,})" for m, n in stats["alias_hits"].most_common())
         print(f"  make aliases applied:      {hits}")
