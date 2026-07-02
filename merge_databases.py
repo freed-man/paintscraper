@@ -351,6 +351,42 @@ def compute_unambiguous_short(sources):
     return {key for key, ids in short_colours.items() if len(ids) == 1}
 
 
+def backfill_swatches(rows):
+    """Fill a hexless row's swatch from a same-base, same-name sibling that has
+    one -- e.g. the pv base 'DDSE' (Blue Candy, no hex) inherits #006D8A from its
+    colorndrive sibling 'DDSEWTA'. Fill-only: it never overwrites an existing hex
+    and never touches code or names, so it cannot change any code<->name
+    resolution -- it only raises swatch coverage. A sibling is a longer code that
+    shares the base (startswith) AND a normalized name. If several qualifying
+    siblings disagree on hex, the most common wins (deterministic).
+    """
+    by_mfr = defaultdict(list)
+    for r in rows:
+        by_mfr[r["manufacturer"]].append(r)
+    filled = 0
+    for group in by_mfr.values():
+        hex_by_name = defaultdict(list)          # normalized name -> rows that carry a hex
+        for r in group:
+            if r["hex"]:
+                for n in r["normalized_names"]:
+                    hex_by_name[n].append(r)
+        for a in group:
+            if a["hex"]:
+                continue
+            sib_hexes, seen = [], set()
+            for n in a["normalized_names"]:
+                for b in hex_by_name.get(n, []):
+                    if b["code"] in seen:
+                        continue
+                    if b["code"].startswith(a["code"]) and len(b["code"]) > len(a["code"]):
+                        seen.add(b["code"])
+                        sib_hexes.append(b["hex"])
+            if sib_hexes:
+                a["hex"] = Counter(sib_hexes).most_common(1)[0][0]
+                filled += 1
+    return filled
+
+
 def build_lookup(sources):
     """sources: list of (name, records). Returns (output_rows, stats)."""
     # Short manufacturer codes (<=2 chars) that unambiguously name one colour
@@ -438,6 +474,7 @@ def build_lookup(sources):
             "sources": sorted(e["sources"]),
         })
 
+    stats["backfilled_swatches"] = backfill_swatches(rows)
     rows.sort(key=lambda x: (x["manufacturer"], x["code"]))
     stats["short_code_rows"] = sum(1 for r in rows if len(r["code"]) <= 2)
     return rows, stats
@@ -449,6 +486,9 @@ def print_stats(rows, stats):
         print(f"  {name:14s} {n:>8,} records used")
     print(f"  skipped (no manufacturer): {stats['skipped_no_mfr']:,}")
     print(f"  skipped (no reliable code): {stats['skipped_no_code']:,}")
+    if stats.get("backfilled_swatches"):
+        print(f"  swatches backfilled:       {stats['backfilled_swatches']:,} "
+              f"(hexless codes filled from a same-name sibling)")
     if stats.get("short_code_rows"):
         print(f"  recovered short codes:     {stats['short_code_rows']:,} "
               f"(<=2 chars, unambiguous within make)")
