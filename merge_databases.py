@@ -358,7 +358,8 @@ def backfill_swatches(rows):
     and never touches code or names, so it cannot change any code<->name
     resolution -- it only raises swatch coverage. A sibling is a longer code that
     shares the base (startswith) AND a normalized name. If several qualifying
-    siblings disagree on hex, the most common wins (deterministic).
+    siblings that disagree, the most common wins; ties are broken by the lowest
+    hex value so the result is fully order-independent (byte-reproducible).
     """
     by_mfr = defaultdict(list)
     for r in rows:
@@ -382,9 +383,46 @@ def backfill_swatches(rows):
                         seen.add(b["code"])
                         sib_hexes.append(b["hex"])
             if sib_hexes:
-                a["hex"] = Counter(sib_hexes).most_common(1)[0][0]
+                counts = Counter(sib_hexes)
+                top_n = max(counts.values())
+                a["hex"] = min(h for h, c in counts.items() if c == top_n)
                 filled += 1
     return filled
+
+
+# Curated colour-name aliases: official manufacturer names that no scraper
+# carries, keyed to the code they belong on. Applied after the merge so the
+# name lands on the real, orderable code already in the data. Kept tiny and
+# hand-verified against the manufacturer's own listing -- not a general rule.
+CURATED_ALIASES = {
+    # Ford's shop lists the colour "Blue Candy FOE" with Colour Code DDSEWTA
+    # (verified: FOE is part of the NAME, not a code -- it is on no Ford code
+    # list). partslink24 returns "Blue Candy (FOE)"; this alias resolves that
+    # straight to DDSEWTA, the real #006D8A retail code already in the data.
+    ("ford", "DDSEWTA"): ["Blue Candy FOE"],
+}
+
+
+def apply_curated_aliases(rows):
+    """Append hand-verified official names (that no scraper carries) onto the
+    code they belong to. Name-only: it adds to all_names / normalized_names and
+    never touches a code, hex, or model tag, so it cannot change any existing
+    resolution -- it only lets the official name resolve to its real code.
+    """
+    added = 0
+    for r in rows:
+        extra = CURATED_ALIASES.get((r["manufacturer"], r["code"]))
+        if not extra:
+            continue
+        for name in extra:
+            if name not in r["all_names"]:
+                r["all_names"].append(name)
+            norm = normalize_color_name(name)
+            if norm and norm not in r["normalized_names"]:
+                r["normalized_names"].append(norm)
+                added += 1
+        r["normalized_names"].sort()
+    return added
 
 
 def build_lookup(sources):
@@ -474,6 +512,7 @@ def build_lookup(sources):
             "sources": sorted(e["sources"]),
         })
 
+    stats["curated_aliases_added"] = apply_curated_aliases(rows)
     stats["backfilled_swatches"] = backfill_swatches(rows)
     rows.sort(key=lambda x: (x["manufacturer"], x["code"]))
     stats["short_code_rows"] = sum(1 for r in rows if len(r["code"]) <= 2)
@@ -489,6 +528,9 @@ def print_stats(rows, stats):
     if stats.get("backfilled_swatches"):
         print(f"  swatches backfilled:       {stats['backfilled_swatches']:,} "
               f"(hexless codes filled from a same-name sibling)")
+    if stats.get("curated_aliases_added"):
+        print(f"  curated aliases added:     {stats['curated_aliases_added']:,} "
+              f"(official names attached to their real code)")
     if stats.get("short_code_rows"):
         print(f"  recovered short codes:     {stats['short_code_rows']:,} "
               f"(<=2 chars, unambiguous within make)")
