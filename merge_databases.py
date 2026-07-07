@@ -400,6 +400,13 @@ CURATED_ALIASES = {
     # list). partslink24 returns "Blue Candy (FOE)"; this alias resolves that
     # straight to DDSEWTA, the real #006D8A retail code already in the data.
     ("ford", "DDSEWTA"): ["Blue Candy FOE"],
+    # partslink24 returns "Red Candy Tint Cc" (Tinted Clearcoat -- part of the
+    # paint's official name, cf. US "Red Candy Tint Metallic" U6) for the
+    # European S-Max in this colour. The paint is 9SSEWTA: the smax-tagged
+    # Candy Red Pearl (#8F001D) -- an EU S-Max-specific retail listing groups
+    # 9SSEWTA/PN3K7/9SSE as this one paint. NOT the same as "Red Candy 2"
+    # (RZ/BRREWTA/M7293A #741A24), a later, different paint.
+    ("ford", "9SSEWTA"): ["Red Candy Tint CC"],
 }
 
 
