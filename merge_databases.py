@@ -407,6 +407,13 @@ CURATED_ALIASES = {
     # 9SSEWTA/PN3K7/9SSE as this one paint. NOT the same as "Red Candy 2"
     # (RZ/BRREWTA/M7293A #741A24), a later, different paint.
     ("ford", "9SSEWTA"): ["Red Candy Tint CC"],
+    # partslink24 returns the ENGLISH "Obsession Blue"; the dataset stores the
+    # French "Bleu Obsession (Metallic)". Same paint, same code: EDP is
+    # Peugeot's universal code for Bleu Obsession (the 408's 2022 launch
+    # colour, extended range-wide -- current 3008/5008 hybrids in the live
+    # log). Verified against UK + FR retail listings ("Bleu Obsession Blue,
+    # Colour Code EDP"); no second-generation variant exists.
+    ("peugeot", "EDP"): ["Obsession Blue"],
 }
 
 
