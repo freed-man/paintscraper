@@ -1,5 +1,17 @@
 """
-Scrapy spider for https://www.automotivetouchup.com/
+ARCHIVED -- legacy US-market experiment. NOT part of the pipeline.
+
+Scrapy spider for https://www.automotivetouchup.com/ -- the pre-chipex US
+source experiment, kept for history in case a US-market source is ever
+wanted again. Nothing consumes its output: the live merge sources are
+chipex / colorndrive / peinturevoiture, this spider emits no color_hex,
+and its year field is ignored by the year-blind merge.
+
+To revive: `pip install scrapy-fake-useragent` first -- its UA-rotation
+middleware is referenced by string in custom_settings below, but the
+package was dropped from requirements.txt at archive time. The reference
+is only resolved when THIS spider crawls, so the live spiders and
+`scrapy list` work without the package (verified).
 
 Filters: year, make, model (all optional)
 Outputs: year, manufacturer, model, color_name, color_codes

@@ -126,8 +126,15 @@ def normalize_color_name(name):
 # -- Colour classification (for VDG colour-group disambiguation) ------------
 
 COLOR_KEYWORDS = {
+    # 'candy' used to sit in this white list, and with white checked first it
+    # made EVERY candy name classify white ('Candy Red', 'Blue Candy' -- 172
+    # shipped rows, ~150 of them wrongly). It is a finish/marketing word, not
+    # a colour. Genuine candy-whites all carry a real white word ('Candy
+    # White', 'Candyweiss') and keep classifying white without it -- verified
+    # against the shipped data: all 24 true whites stay white, ~150 rows move
+    # to their real group, and nothing outside the candy set changes.
     "white":  ["white", "weiss", "weis", "bianco", "branco", "blanco",
-               "blanc", "candy"],
+               "blanc"],
     "black":  ["black", "schwarz", "nero", "preto", "negro", "noir"],
     "grey":   ["grey", "gray", "grau", "grigio", "cinza", "gris",
                "silver", "silber", "platinum", "graphite", "graphit"],
