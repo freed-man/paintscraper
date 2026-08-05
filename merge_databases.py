@@ -421,6 +421,17 @@ CURATED_ALIASES = {
     # log). Verified against UK + FR retail listings ("Bleu Obsession Blue,
     # Colour Code EDP"); no second-generation variant exists.
     ("peugeot", "EDP"): ["Obsession Blue"],
+    # partslink24 returns the ENGLISH "Okenite White"; the dataset stores the
+    # French "Blanc Okenite (Nacre Metallic)" on peugeot. Same paint, same
+    # code: ESU is the Stellantis-wide Blanc Okenite / Okenite White, Peugeot's
+    # default white since ~2023 (replaced Blanc Banquise / Blanc Nacre).
+    # Triangulated: FR specialist + multiple retailers ("BLANC OKENITE, Colour
+    # Code ESU"); in-dataset, jeep/lancia/vauxhall already carry "Okenite
+    # White" on ESU verbatim, and citroen/ESU's hex #9EA2A5 matches peugeot's
+    # #9DA2A4. The row's stray "Aquamarine Mica" name is 90s-era ESU code
+    # reuse (306 Cabriolet tag) -- pre-existing, harmless, same quirk as
+    # EDP's "Brun Palombe".
+    ("peugeot", "ESU"): ["Okenite White"],
 }
 
 
