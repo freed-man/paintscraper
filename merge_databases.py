@@ -616,6 +616,8 @@ def main():
     args = sys.argv[1:]
     if "-o" in args:
         oi = args.index("-o")
+        if oi + 1 >= len(args):
+            sys.exit("-o needs a filename, e.g. -o paint_lookup.json")
         output_file = args[oi + 1]
         specs = args[:oi] + args[oi + 2:]
     else:

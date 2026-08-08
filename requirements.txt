@@ -1,3 +1,3 @@
-scrapy
+scrapy>=2.13,<3
 # scrapy-fake-useragent: needed only by the archived atu spider -- install
 # manually if reviving it (see paintscraper/spiders/atu_spider.py header).
