@@ -248,12 +248,33 @@ def parse_reliable_codes(code_string, mfr=None, unambiguous_short=None):
     Split on both ',' and ';': chipex joins multi-codes with ',', but a
     stray ';' separator occasionally leaks through and must not survive as
     a junk code like '6;V'.
+
+    DOUBLING RESCUE. is_reliable_code drops 'F1F1'-style doubling because it
+    is a redundant notation: where a record carries both 'F1F1' and 'LY3D',
+    the long code is the one to keep. But the rule fires on the SHAPE alone,
+    so a record whose ONLY code is doubled loses its colour entirely -- 270
+    records across the corpus, 129 distinct (make, code) pairs, 60 of them
+    colours reachable under no other code (Mercedes 1212 Ginstergelb, Volvo
+    1717 Schwarz Matt, Peugeot 1010 Blanc Casse). Those are real codes in the
+    source, with names and swatches: peinturevoiture even spells the code
+    inside the name ('AMARILLO MB 1212'). So when the normal filters leave
+    NOTHING, retry allowing the doubled form. This is strictly additive --
+    it cannot fire while any other code survives, so no existing row can
+    change -- and it preserves the original intent (drop the redundant
+    notation, not the only one).
     """
     raw = re.split(r"[,;]", code_string)
     all_codes = [c.strip().upper() for c in raw if c.strip()]
-    return {c for c in all_codes
+    kept = {c for c in all_codes
             if is_reliable_code(c, all_codes, mfr, unambiguous_short)
             and not is_composite_crossref(c)}
+    if kept:
+        return kept
+    hyphenated = [h for h in all_codes if "-" in h]
+    return {c for c in all_codes
+            if len(c) == 4 and c[:2] == c[2:]
+            and not is_composite_crossref(c)
+            and not any(c != h and c in h for h in hyphenated)}
 
 
 # -- Name helpers -----------------------------------------------------------
