@@ -453,6 +453,18 @@ CURATED_ALIASES = {
     # reuse (306 Cabriolet tag) -- pre-existing, harmless, same quirk as
     # EDP's "Brun Palombe".
     ("peugeot", "ESU"): ["Okenite White"],
+    # pl24 and One Auto both return the ENGLISH "Agueda Yellow" for a 2024
+    # 208; the row already carries the French "Jaune Agueda" (+ the misspelt
+    # "Jaune Aguenda") from all three scrapers, hex #A69A37, 208-tagged, and
+    # is already classified yellow -- only the English string was missing.
+    # Verified unique: no other peugeot row carries any agueda name. Note the
+    # row's PRIMARY name is "Brun Epicee", an unrelated 90s colour sharing the
+    # code through Peugeot code reuse (same quirk as EDP's "Brun Palombe" and
+    # ESU's "Aquamarine Mica") -- the alias fixes name->code, it does not
+    # change which name is displayed. Do NOT add this to citroen/EEQ: that row
+    # is genuinely Mocha Metallic (#4E2415, Xantia/XM), a coincidental code
+    # collision, not the same paint.
+    ("peugeot", "EEQ"): ["Agueda Yellow"],
 }
 
 
