@@ -1,78 +1,91 @@
 """
 Scrapy spider for https://www.ftpaints.co.uk/vehicle-colour-codes
+Scrapes every vehicle paint colour FT Paints lists, by make.
 
-Scrapes every vehicle paint colour, with its production year range.
-
-Outputs: manufacturer, color_name, color_codes, year
+Outputs: manufacturer, color_name, color_codes, year, finish, paint_stages, url
 Filters: makes (optional), FT's URL slugs, e.g.  -a makes=porsche,land-rover
+Options: previous (optional), the last scrape of this site, e.g.
+             -a previous=ftpaints_full.json
+         max_details (optional, default 500), see "New colours" below
 
 URL pattern:
-    /vehicle-colour-codes                     index of every make + count
-    /vehicle-colour-codes/{make}?page=N       24 colour cards per page
+    /vehicle-colour-codes                           index of every make + count
+    /vehicle-colour-codes/{make}/all-colours        every colour of a make, one page
+    /vehicle-colour-codes/{make}/{colour-slug}      one colour: code, name,
+                                                    finish, paint stages, years
 
-How it works:
-    The index links every make and states how many colours it has
-    ("Porsche 597 colour codes"). Each make's listing is a server-rendered
-    Next.js page of 24 cards, newest first, paged with ?page=N. A card
-    carries the make, the paint code, the colour name and the production
-    year range:
+Why not the paged listing any more:
+    Until September 2026 this spider read the make listing
+    (/vehicle-colour-codes/{make}?page=N, newest first), because only its
+    cards carried the year range. Since then FT's robots.txt disallows
+    /*?page= (and /*?year=, /*?sort= and other listing parameters), so that
+    crawl would stop after page 1 of every make: 2,372 of its 2,516
+    requests would be skipped. Checked 2026-10-27; the run on 2026-09-22
+    was not affected.
 
-        <article> ... <p class="... font-medium ...">Porsche</p>
-                      <p class="... font-mono ...">R699:23</p>
-                      <h3><a href="/vehicle-colour-codes/porsche/...">Felsengruen</a></h3>
-                      <p class="...">2023 - 2025</p> ... </article>
+How it works now:
+    1. The index states every make's colour count ("Porsche 597 colour
+       codes") and its display name.
+    2. Each make's all-colours page lists the make's COMPLETE set as
+       links, "CODE — Name", one page, no pagination:
+           <a href="/vehicle-colour-codes/zaz/zaz-z9051-abendrot">
+             <span class="font-medium text-ink">Z9051</span> — Abendrot</a>
+       Codes are taken from the <span>, never the URL slug (the slug
+       mangles punctuation: 'R699:23' becomes 'r699-23'). Checked
+       2026-10-27 against the 2026-09-22 scrape for Porsche (597), Mercedes
+       Benz (1,089), Ford (3,949) and ZAZ (40): every code and name
+       identical, so switching pages changes nothing in those two fields.
+    3. Year range, finish and paint stages are only on each colour's own
+       page, which costs one request per colour (58,702 in all). So they
+       are fetched only for colours that are NEW since the previous scrape:
+       see below.
 
-    Page 1 of each make is fetched, its highest page number is read from
-    the pagination links, and the remaining pages are requested directly.
+    About 145 requests plus one per new colour; a few minutes at the house
+    pace (settings.py).
 
-    Why the paged view and not /{make}/all-colours: all-colours lists a
-    make in ONE page, but only as "CODE -- Name" links with no year range.
-    The year range exists only on the cards, so the paged view is the only
-    single pass that gets all four fields. Sized from the index
-    (2026-09-22): 144 makes, 58,702 colours, 2,516 page requests; see
-    custom_settings for how they are paced.
+New colours (-a previous=...):
+    Give the spider the last scrape of this site and it compares every
+    colour against it on (manufacturer, color_codes, color_name). Colours
+    found there are written with year, finish and paint_stages BLANK,
+    because they were not fetched on this run; the earlier scrape still
+    has their year. Colours not found there get their own page fetched,
+    and those three fields filled in from it.
 
-    Field mapping (house schema, same keys as the other spiders so
-    merge_databases.py takes the output unchanged):
-        card make   -> manufacturer
-        card code   -> color_codes
-        card name   -> color_name
-        year range  -> year   (same field and "YYYY - YYYY" / "YYYY -"
-                               shape as peinturevoiture's year; the merge
-                               currently ignores year entirely)
+    A blank year therefore means "not fetched this run", never "the site
+    has no year". Without -a previous, nothing is fetched and all three
+    fields are blank on every row.
 
-    The card swatch colour is deliberately NOT scraped into color_hex. It
-    is a colour-family placeholder, not a paint swatch: on the saved
-    Porsche page seven different blues (Miami Blue to Enzian Blue) share
-    #3b6ea5, and orange Papaya and red Copper Ruby get the grey fallback
-    #d4d4d8. The site says so itself: "Swatches are an approximate guide
-    based on the colour name". Fed to the merge, it would paint Papaya
-    grey.
+    max_details caps the colour pages fetched in one run (default 500).
+    If a run finds more new colours than that, the rest are written
+    without the extra fields and the log says how many, so a mismatch in
+    the previous file (renamed make, changed name format) cannot turn
+    into an accidental 58,000-request crawl.
 
-    Codes are taken from the card text, never the URL slug: the slug
-    mangles punctuation ('R699:23' becomes 'r699-23'). Values are only
-    whitespace-collapsed. Some names on the site already carry a broken
-    character (U+FFFD, e.g. 'Cuv?e Silver'); that is the site's data and
-    is passed through unchanged.
+Swatch:
+    The card swatch colour is deliberately NOT scraped. It is a
+    colour-family placeholder, not a paint swatch: on the Porsche listing
+    (checked again 2026-10-27) 48 colours share 8 hex values, Lugano Blue
+    and Pale Blue share #3b6ea5, and Provence gets the grey #d4d4d8.
 
-    Completeness check: every card is counted per make and compared with
-    the index count when the spider closes. Any make that came up short or
-    long is logged as a WARNING, so a partial crawl cannot pass silently.
-    A card seen twice (the listing shifting mid-crawl) is yielded once.
+Completeness check:
+    Colours are counted per make and compared with the index count when
+    the spider closes. Any make that came up short or long is logged as a
+    WARNING, so a partial crawl cannot pass silently.
 
-Run:
-    python -m scrapy crawl ftpaints -O ftpaints_full.json
+Run (from the paintscraper folder, keeping the previous scrape as it is):
+    python -m scrapy crawl ftpaints -a previous=ftpaints_full.json -O ftpaints_2026-10-27.json
+    python -m scrapy crawl ftpaints -a makes=zaz,porsche -a previous=ftpaints_full.json -O ftpaints_test.json
     (-O overwrites; -o would append a second JSON array to an existing
-    file and corrupt it.)
+    file and corrupt it. Never point -O at the file passed as previous.)
 
 Logging:
     LOG_FILE writes the full run log to ftpaints_log.txt in the working
-    directory on every run, so the terminal stays quiet during the crawl.
-    The run ends with an INFO summary and one WARNING per make whose count
-    does not match the index. If it yielded 0, check the log for
-    "Forbidden by robots.txt" or an ERROR line.
+    directory, so the terminal stays quiet during the crawl. The run ends
+    with an INFO summary, one WARNING per make whose count does not match
+    the index, and a WARNING if robots.txt made Scrapy skip anything.
 """
 
+import json
 import re
 from collections import Counter
 from urllib.parse import urlparse
@@ -80,15 +93,14 @@ from urllib.parse import urlparse
 import scrapy
 
 
-# /vehicle-colour-codes/{slug} with exactly one segment after the base.
+# /vehicle-colour-codes/{slug}: exactly one segment after the base.
 MAKE_PATH = re.compile(r"^/vehicle-colour-codes/([a-z0-9][a-z0-9-]*)/?$")
-# "597 colour codes" (index link text; the count may carry a comma).
+# /vehicle-colour-codes/{slug}/{colour}: exactly two segments.
+COLOUR_PATH = re.compile(r"^/vehicle-colour-codes/([a-z0-9][a-z0-9-]*)/([^/]+?)/?$")
+# "597 colour codes" (index caption; the count may carry a comma).
 COUNT_TEXT = re.compile(r"(\d[\d,]*)\s*colour codes", re.I)
-# Year slot: "2023 - 2025", "2012 -", "- 2012" or "2012".
-YEAR_TEXT = re.compile(r"\d{4}(?:\s*-\s*(?:\d{4})?)?|-\s*\d{4}")
-PAGE_PARAM = re.compile(r"[?&]page=(\d+)")
-
-CARDS_PER_PAGE = 24
+# The separator between code and name on the all-colours page.
+LEADING_DASH = re.compile(r"^\s*[—–-]\s*")
 
 
 def _clean(text):
@@ -102,145 +114,195 @@ class FTPaintsSpider(scrapy.Spider):
     allowed_domains = ["ftpaints.co.uk"]
     start_urls = ["https://www.ftpaints.co.uk/vehicle-colour-codes"]
 
+    # User agent, robots.txt, pace and back-off are the house defaults in
+    # settings.py. At ~145 requests a run, there is no need to go faster.
     custom_settings = {
-        "ROBOTSTXT_OBEY": True,
-        # Paced faster than the other spiders, but adaptively. AutoThrottle
-        # measures FT's response times and sets the delay itself, backing
-        # off if the server slows; it starts at a gentle 1s and never goes
-        # below DOWNLOAD_DELAY. The listing offers no bigger page size (no
-        # page-size parameter, API route or sitemap on the page), so the
-        # request count is fixed at ~2,516 and pace is the only lever:
-        # ~42 minutes at 1/s becomes roughly 10-20 at this floor, depending
-        # on how fast the site answers.
-        "DOWNLOAD_DELAY": 0.25,
-        "AUTOTHROTTLE_ENABLED": True,
-        "AUTOTHROTTLE_START_DELAY": 1.0,
-        "AUTOTHROTTLE_MAX_DELAY": 10.0,
-        "AUTOTHROTTLE_TARGET_CONCURRENCY": 2.0,
-        "CONCURRENT_REQUESTS": 4,
-        # settings.py pins this to 1 for every spider; without overriding it
-        # here, the concurrency above would have no effect.
-        "CONCURRENT_REQUESTS_PER_DOMAIN": 4,
-        "USER_AGENT": "PaintScraper (personal learning project)",
-        "LOG_LEVEL": "INFO",
         "LOG_FILE": "ftpaints_log.txt",
     }
 
-    def __init__(self, makes=None, *args, **kwargs):
+    def __init__(self, makes=None, previous=None, max_details=500,
+                 *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.filter_makes = set(
             m.strip().lower() for m in makes.split(",") if m.strip()
         ) if makes else set()
+        self.max_details = int(max_details)
+        self.previous = previous
+        self.known = self._load_previous(previous) if previous else None
+
         self.expected = {}          # slug -> colour count stated on the index
-        self.got = Counter()        # slug -> cards yielded
-        self.seen = set()           # colour detail hrefs already yielded
+        self.make_names = {}        # slug -> make name shown on the index
+        self.got = Counter()        # slug -> colours written
+        self.seen = set()           # colour page URLs already handled
+        self.new = 0                # colours not in the previous scrape
+        self.details_sent = 0
+        self.details_capped = 0
+        self.details_failed = 0
+
+    @staticmethod
+    def _load_previous(path):
+        try:
+            with open(path, encoding="utf-8") as f:
+                rows = json.load(f)
+        except FileNotFoundError:
+            raise ValueError(f"previous: no such file: {path}") from None
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"previous: {path} is not valid JSON ({exc})") from None
+        return {
+            (_clean(r.get("manufacturer")), _clean(r.get("color_codes")),
+             _clean(r.get("color_name")))
+            for r in rows if isinstance(r, dict)
+        }
 
     # -- Index ----------------------------------------------------------
 
     def parse(self, response):
-        found = {}
+        if self.known is not None:
+            self.logger.info("Previous scrape %s: %d colours to compare against.",
+                             self.previous, len(self.known))
+
+        found, names = {}, {}
         for link in response.css("a[href]"):
             path = urlparse(response.urljoin(link.attrib["href"])).path
             m = MAKE_PATH.match(path)
             if not m:
                 continue
+            caption = (link.css("span.text-caption").xpath("string()").get()
+                       or link.xpath("string()").get())
+            count = COUNT_TEXT.search(_clean(caption))
+            if not count:
+                continue            # breadcrumb or nav link, not a make entry
             slug = m.group(1)
-            count = COUNT_TEXT.search(_clean(link.xpath("string()").get()))
-            if count:
-                found[slug] = int(count.group(1).replace(",", ""))
-            else:
-                found.setdefault(slug, None)
+            found[slug] = int(count.group(1).replace(",", ""))
+            name = _clean(link.css("span.text-h4").xpath("string()").get())
+            if name:
+                names[slug] = name
 
-        # Breadcrumb-style links without a count are not make entries.
-        makes = {s: c for s, c in found.items() if c is not None}
-        if not makes:
+        if not found:
             self.logger.error(
                 "No make links with colour counts found on %s -- the index "
                 "layout has changed; nothing scraped.", response.url)
             return
 
+        unnamed = sorted(set(found) - set(names))
+        if unnamed:
+            self.logger.warning(
+                "No make name on the index for %s; using the URL slug, which "
+                "will not match earlier scrapes.", ", ".join(unnamed))
+
         if self.filter_makes:
-            unknown = self.filter_makes - set(makes)
+            unknown = self.filter_makes - set(found)
             if unknown:
                 self.logger.warning(
                     "makes filter: no such slug on the index: %s",
                     ", ".join(sorted(unknown)))
-            makes = {s: c for s, c in makes.items() if s in self.filter_makes}
+            found = {s: c for s, c in found.items() if s in self.filter_makes}
 
-        self.expected = makes
+        self.expected = found
+        self.make_names = names
         self.logger.info(
             "Index: %d makes, %d colours expected.",
-            len(makes), sum(makes.values()))
+            len(found), sum(found.values()))
 
-        for slug in sorted(makes):
+        for slug in sorted(found):
             yield response.follow(
-                f"/vehicle-colour-codes/{slug}",
-                callback=self.parse_page,
-                cb_kwargs={"slug": slug, "page": 1})
+                f"/vehicle-colour-codes/{slug}/all-colours",
+                callback=self.parse_all,
+                cb_kwargs={"slug": slug})
 
-    # -- Make listing pages ---------------------------------------------
+    # -- All colours of one make ----------------------------------------
 
-    def parse_page(self, response, slug, page):
-        cards = [c for c in response.css("article")
-                 if c.css('h3 a[href*="/vehicle-colour-codes/"]')]
-        if not cards:
-            self.logger.error(
-                "No colour cards on %s -- layout changed or empty page.",
-                response.url)
-
-        for card in cards:
-            item = self._parse_card(card, response)
-            if item is None:
+    def parse_all(self, response, slug):
+        make = self.make_names.get(slug) or slug.replace("-", " ").title()
+        listed = 0
+        for link in response.css("a[href]"):
+            url = response.urljoin(link.attrib["href"])
+            m = COLOUR_PATH.match(urlparse(url).path)
+            if not m or m.group(1) != slug or m.group(2) == "all-colours":
                 continue
-            href, record = item
-            if href in self.seen:
+            if url in self.seen:
                 continue
-            self.seen.add(href)
+            code = _clean(link.css("span.font-medium").xpath("string()").get())
+            if not code:
+                continue            # a link to a colour page, but not a list entry
+            self.seen.add(url)
+            listed += 1
+
+            text = _clean(link.xpath("string()").get())
+            name = text[len(code):] if text.startswith(code) else text
+            name = LEADING_DASH.sub("", name).strip()
+
+            record = {
+                "manufacturer": make,
+                "color_name": name,
+                "color_codes": code,
+                "year": "",
+                "finish": "",
+                "paint_stages": "",
+                "url": url,
+            }
+
+            if self.known is not None and (make, code, name) not in self.known:
+                self.new += 1
+                if self.details_sent < self.max_details:
+                    self.details_sent += 1
+                    yield response.follow(
+                        url,
+                        callback=self.parse_detail,
+                        errback=self.detail_failed,
+                        cb_kwargs={"record": record, "slug": slug})
+                    continue
+                self.details_capped += 1
+
             self.got[slug] += 1
             yield record
 
-        if page == 1:
-            last = max((int(n) for n in PAGE_PARAM.findall(
-                " ".join(response.css("a::attr(href)").getall()))),
-                default=1)
-            expected = self.expected.get(slug)
-            if expected:
-                # Trust the index count if pagination is missing or short.
-                last = max(last, -(-expected // CARDS_PER_PAGE))
-            for n in range(2, last + 1):
-                yield response.follow(
-                    f"/vehicle-colour-codes/{slug}?page={n}",
-                    callback=self.parse_page,
-                    cb_kwargs={"slug": slug, "page": n})
+        if not listed:
+            self.logger.error(
+                "No colours listed on %s -- layout changed or empty page.",
+                response.url)
 
-    def _parse_card(self, card, response):
-        link = card.css('h3 a[href*="/vehicle-colour-codes/"]')
-        href = response.urljoin(link.attrib.get("href", ""))
-        name = _clean(link.xpath("string()").get())
-        code = _clean(card.css("p.font-mono").xpath("string()").get())
-        make = _clean(card.css("p.font-medium").xpath("string()").get())
+    # -- One colour's own page (new colours only) ------------------------
 
-        year = ""
-        for p in card.css("p"):
-            text = _clean(p.xpath("string()").get())
-            if YEAR_TEXT.fullmatch(text):
-                year = text
+    def parse_detail(self, response, record, slug):
+        facts = {}
+        for dl in response.css("dl"):
+            pairs = {}
+            for dt in dl.css("dt"):
+                label = _clean(dt.xpath("string()").get()).lower()
+                value = _clean(dt.xpath("following-sibling::dd[1]").xpath("string()").get())
+                pairs[label] = value
+            if "colour code" in pairs:
+                facts = pairs
                 break
 
-        # A card without a make or code is unusable downstream: the merge
-        # keys on (make, code). Name and year may legitimately be blank.
-        if not make or not code:
+        if not facts:
             self.logger.warning(
-                "Skipping card with no make or code on %s (%s)",
-                response.url, href)
-            return None
+                "No colour facts on %s -- keeping %s %s without year/finish.",
+                response.url, record["manufacturer"], record["color_codes"])
+        elif facts.get("colour code") != record["color_codes"]:
+            self.logger.warning(
+                "Code on %s reads %r, the all-colours list says %r; keeping "
+                "the list's code.", response.url, facts.get("colour code"),
+                record["color_codes"])
 
-        return href, {
-            "manufacturer": make,
-            "color_name": name,
-            "color_codes": code,
-            "year": year,
-        }
+        record = dict(record)
+        record["year"] = facts.get("year range", "")
+        record["finish"] = facts.get("finish", "")
+        record["paint_stages"] = facts.get("paint stages", "")
+        self.got[slug] += 1
+        yield record
+
+    def detail_failed(self, failure):
+        request = failure.request
+        record = request.cb_kwargs["record"]
+        self.details_failed += 1
+        self.logger.warning(
+            "Colour page failed (%s): %s -- keeping %s %s without year/finish.",
+            failure.getErrorMessage(), request.url, record["manufacturer"],
+            record["color_codes"])
+        self.got[request.cb_kwargs["slug"]] += 1
+        yield record
 
     # -- Completeness ---------------------------------------------------
 
@@ -253,6 +315,23 @@ class FTPaintsSpider(scrapy.Spider):
                 self.logger.warning(
                     "Count mismatch for %s: index says %d, scraped %d.",
                     slug, want, have)
+
+        if self.known is None:
+            self.logger.info(
+                "No -a previous given: year, finish and paint_stages are "
+                "blank on every row.")
+        else:
+            self.logger.info(
+                "New since %s: %d colours; %d colour pages fetched, %d "
+                "failed, %d not fetched (max_details=%d).",
+                self.previous, self.new, self.details_sent,
+                self.details_failed, self.details_capped, self.max_details)
+        if self.details_capped:
+            self.logger.warning(
+                "%d new colours were written without year/finish because of "
+                "max_details. Check the previous file matches this site's "
+                "make names before raising it.", self.details_capped)
+
         self.logger.info(
             "ftpaints: %d colours scraped across %d makes (index expected "
             "%d); %d makes mismatched; close reason: %s.",

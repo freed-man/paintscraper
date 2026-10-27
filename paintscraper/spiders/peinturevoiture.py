@@ -60,22 +60,27 @@ How it works:
     "Ferrari-Maserati" vs others' "Ferrari") is the merge's job via aliases.
 
 Politeness:
-    ROBOTSTXT_OBEY is True, 1s delay, honest UA -- same as the other two
-    spiders. robots.txt is respected at runtime; if the site disallows
-    these paths the run log will say so.
+    From settings.py, same as every spider: honest user agent, robots.txt
+    obeyed, one request at a time about 1 s apart, AutoThrottle, and the
+    PolitenessGuard that backs off and stops if the site starts refusing.
+    robots.txt (checked 2026-10-27) blocks /cache/, /recherche/,
+    /recherche-marque/, /api/ and /?modele= for everyone, and CCBot and
+    ChatGPT-User entirely; /marques and /marque/... pages are open.
+    About 160 requests, roughly 3 minutes.
 
-Usage:
-    python -m scrapy crawl peinturevoiture -o peinturevoiture_full.json
-    python -m scrapy crawl peinturevoiture -a makes=citroen -o pv_citroen.json
-    python -m scrapy crawl peinturevoiture -a makes=ford-europe,citroen -o pv_sel.json
+Run:
+    python -m scrapy crawl peinturevoiture -O peinturevoiture_full.json
+    python -m scrapy crawl peinturevoiture -a makes=citroen -O pv_citroen.json
+    python -m scrapy crawl peinturevoiture -a makes=ford-europe,citroen -O pv_sel.json
+    (-O overwrites; -o would append a second JSON array to an existing
+    file and corrupt it.)
 
 Logging:
     LOG_FILE writes the full run log to peinturevoiture_log.txt in the
-    working directory on every run. Note: with LOG_FILE set, Scrapy sends
-    the log to the file rather than the console, so the terminal stays quiet
-    during the crawl. To watch it live AND keep the file, drop the LOG_FILE
-    line and instead run:
-        python -m scrapy crawl peinturevoiture -o peinturevoiture_full.json
+    working directory, so the terminal stays quiet during the crawl. To
+    watch it live AND keep the file, drop the LOG_FILE line and instead
+    run:
+        python -m scrapy crawl peinturevoiture -O peinturevoiture_full.json
             2>&1 | Tee-Object peinturevoiture_log.txt
 """
 
@@ -90,12 +95,9 @@ class PeintureVoitureSpider(scrapy.Spider):
     allowed_domains = ["code.peinturevoiture.fr"]
     start_urls = ["https://code.peinturevoiture.fr/marques"]
 
+    # Everything else (user agent, robots.txt, pace, back-off) is the house
+    # default in settings.py.
     custom_settings = {
-        "ROBOTSTXT_OBEY": True,
-        "DOWNLOAD_DELAY": 1.0,
-        "CONCURRENT_REQUESTS": 4,
-        "USER_AGENT": "PaintScraper (personal learning project)",
-        "LOG_LEVEL": "INFO",
         "LOG_FILE": "peinturevoiture_log.txt",
     }
 

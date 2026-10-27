@@ -5,7 +5,7 @@ Scrapes every paint colour for each brand in a single request per brand,
 using the brand's "All Models" page.
 
 Outputs: manufacturer, color_name, color_codes, color_hex
-Filters: make (optional)
+Filters: makes (optional), chipex URL slugs, e.g.  -a makes=toyota,land-rover
 
 URL pattern: /brands/{make}/all-models/
 
@@ -22,10 +22,12 @@ How it works:
     brands in ~2 minutes, with per-make counts matching the old
     per-model union exactly (Acura 505, Toyota 728, Volkswagen 595).
 
-    The site's year dropdown is a server-side (WordPress admin-ajax)
-    filter, not data embedded in the page, so year is not recoverable
-    without an extra request per year. We scrape year-blind. Model is
-    not available at the all-models level and is not needed downstream
+    Year is not in the page. The all-models page can be filtered by
+    year with ?year=YYYY (a plain URL parameter, allowed by robots.txt;
+    checked 2026-10-27), so year IS recoverable, but only at one extra
+    request per make per year listed (Dacia lists 23 years, Toyota 42).
+    We scrape year-blind until year earns that cost. Model is not
+    available at the all-models level and is not needed downstream
     (the fill DB keys on make+code and make+name, never model).
 
     Chipex uses hyphens in URL slugs. The 'vw' slug has no all-models
@@ -34,13 +36,22 @@ How it works:
     Colours with no swatch image carry a #f2f2f2 / #ededed placeholder
     background; their name + codes are kept and the hex is left blank.
 
+Run:
+    python -m scrapy crawl chipex -O chipex_full.json
+    python -m scrapy crawl chipex -a makes=toyota,dacia -O chipex_test.json
+    (-O overwrites; -o would append a second JSON array to an existing
+    file and corrupt it.)
+
+Pace and politeness come from settings.py: honest user agent, robots.txt
+obeyed, one request at a time about 1 s apart, AutoThrottle, and the
+PolitenessGuard that backs off and stops if the site starts refusing.
+About 88 requests, roughly 2 minutes.
+
 Logging:
     LOG_FILE writes the full run log to chipex_log.txt in the working
-    directory on every run. Note: with LOG_FILE set, Scrapy sends the
-    log to the file rather than the console, so the terminal stays quiet
-    during the crawl. To watch it live AND keep the file, drop the
-    LOG_FILE line and instead run:
-        python -m scrapy crawl chipex -o chipex_all.json 2>&1 |
+    directory, so the terminal stays quiet during the crawl. To watch it
+    live AND keep the file, drop the LOG_FILE line and instead run:
+        python -m scrapy crawl chipex -O chipex_full.json 2>&1 |
             Tee-Object chipex_log.txt
 """
 
@@ -54,12 +65,9 @@ class ChipexSpider(scrapy.Spider):
     allowed_domains = ["chipex.co.uk"]
     start_urls = ["https://chipex.co.uk/brands/"]
 
+    # Everything else (user agent, robots.txt, pace, back-off) is the house
+    # default in settings.py.
     custom_settings = {
-        "ROBOTSTXT_OBEY": True,
-        "DOWNLOAD_DELAY": 1.0,
-        "CONCURRENT_REQUESTS": 4,
-        "USER_AGENT": "PaintScraper (personal learning project)",
-        "LOG_LEVEL": "INFO",
         "LOG_FILE": "chipex_log.txt",
     }
 

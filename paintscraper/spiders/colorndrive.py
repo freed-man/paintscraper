@@ -2,38 +2,89 @@
 Scrapy spider for https://colorndrive.com/
 
 Filters: makes, models (all optional)
-Outputs: manufacturer, model, color_name, color_codes, color_hex
+Outputs: manufacturer, model, color_name, color_codes, color_hex, color_hex_2
 
 URL patterns:
     Brands list:  /en/car-touch-up-paint  (section #brands)
     Brand page:   /en/{make-slug}-touch-up-paint
-    Model colors: /en/touch-up-paint/{make-slug}-{model-slug}
+    Model colors: /en/touch-up-paint/{make-slug}-{model-slug}   (30 per page, ?p=N)
 
 Note:
     ColorNDrive does not structure colors by year. Colors are listed per
     model (all years combined). The spider does not output a year field —
-    the merge script should handle this accordingly.
+    the merge script should handle this accordingly. (The model page has a
+    Year filter, but it only narrows the list; there is no per-colour year
+    to read.)
 
     The site also provides alternative regional color names (German,
     Portuguese, French, etc.) and hex values via CSS background gradients.
 
-Usage:
-    scrapy crawl colorndrive -o colorndrive_full.json
-    scrapy crawl colorndrive -a makes=volkswagen -o colorndrive_vw.json
-    scrapy crawl colorndrive -a makes=volkswagen -a models=id3,golf -o colorndrive_vw_sel.json
+Swatch (color_hex, color_hex_2):
+    Each swatch is a two-stop gradient,
+        background: linear-gradient(to right, #9E2528 , #500D0B);
+    For solid paints both stops are the same; for metallics and pearls
+    they are not: a light stop then a dark one (Sunsetred Metallic above).
+    On the VW Golf pages checked on 2026-10-27, 48 of 60 swatches had two
+    different stops. color_hex is the FIRST stop, exactly as every earlier
+    run of this spider recorded it, so it stays comparable with past
+    scrapes; color_hex_2 is the second stop as served. Neither is a
+    derived value. Which one (if either) represents the paint is a
+    decision for whoever uses the data, not for the spider.
+
+Pace (measured):
+    The last full run (2026-06-12) made 8,627 requests in 4 h 9 min at one
+    request at a time, with 5 retries (four Cloudflare 524 timeouts and one
+    502) and no refusals. Pages take the site a second or more to build,
+    so most of that time was spent waiting on single responses.
+
+    This spider keeps the same minimum gap between requests (DOWNLOAD_DELAY
+    1 s, randomised 0.5-1.5 s) but allows a second request to be in flight
+    while a slow one finishes (CONCURRENT_REQUESTS_PER_DOMAIN 2,
+    AUTOTHROTTLE_TARGET_CONCURRENCY 2.0). AutoThrottle widens the gap by
+    itself if the site slows down, and the PolitenessGuard backs off on any
+    refusal. Expect roughly 2 to 2.5 hours if the site answers as it did
+    last time. If the log shows the guard slowing down more than a handful
+    of times, go back to one at a time:
+        -s CONCURRENT_REQUESTS_PER_DOMAIN=1
+
+robots.txt (revised by the site 2026-08-16, checked 2026-10-27):
+    Our user agent falls under "User-agent: *", which only closes /admin/,
+    /backoffice/, /cart/, /checkout/, /login/, /register/ and /user/, with
+    no crawl delay. The site's AI-crawler group (ClaudeBot, GPTBot ...) gets
+    Crawl-delay 10 and no ?p= pagination; named "aggressive" bots are shut
+    out and, per the file, blocked at Cloudflare. The site is behind
+    Cloudflare, which is why politeness matters most here.
+
+Run:
+    python -m scrapy crawl colorndrive -O colorndrive_full.json
+    python -m scrapy crawl colorndrive -a makes=volkswagen -O colorndrive_vw.json
+    python -m scrapy crawl colorndrive -a makes=volkswagen -a models=id3,golf -O colorndrive_vw_sel.json
+    (-O overwrites; -o would append a second JSON array to an existing
+    file and corrupt it.)
+
+Pausing and resuming the long run (optional):
+    With a job directory Scrapy can stop on one Ctrl+C and carry on later
+    from where it stopped. Use JSON Lines with -o (append) for this, never
+    -O: a resumed run with -O would overwrite the first part.
+        python -m scrapy crawl colorndrive -o colorndrive_full.jsonl -s JOBDIR=crawls/colorndrive
+    Run the same command again to resume. When it finishes, turn it into
+    the usual JSON array:
+        python -c "import json; rows=[json.loads(l) for l in open('colorndrive_full.jsonl', encoding='utf-8') if l.strip()]; json.dump(rows, open('colorndrive_full.json', 'w', encoding='utf-8'), ensure_ascii=False)"
+    Delete crawls/colorndrive (and the .jsonl) before the next fresh scrape.
 
 Logging:
     LOG_FILE writes the full run log to colorndrive_log.txt in the working
-    directory on every run. Note: with LOG_FILE set, Scrapy sends the log
-    to the file rather than the console, so the terminal stays quiet during
-    the crawl. To watch it live AND keep the file, drop the LOG_FILE line
-    and instead run:
-        python -m scrapy crawl colorndrive -o colorndrive_full.json 2>&1 |
+    directory, so the terminal stays quiet during the crawl. To watch it
+    live AND keep the file, drop the LOG_FILE line and instead run:
+        python -m scrapy crawl colorndrive -O colorndrive_full.json 2>&1 |
             Tee-Object colorndrive_log.txt
 """
 
 import re
 import scrapy
+
+
+HEX = re.compile(r"#([0-9a-fA-F]{6})")
 
 
 class ColorNDriveSpider(scrapy.Spider):
@@ -42,12 +93,11 @@ class ColorNDriveSpider(scrapy.Spider):
     allowed_domains = ["colorndrive.com"]
     start_urls = ["https://colorndrive.com/en/car-touch-up-paint"]
 
+    # User agent, robots.txt and back-off are the house defaults in
+    # settings.py. Only the pace differs; see "Pace" above.
     custom_settings = {
-        "ROBOTSTXT_OBEY": True,
-        "DOWNLOAD_DELAY": 1.0,
-        "CONCURRENT_REQUESTS": 4,
-        "USER_AGENT": "PaintScraper (personal learning project)",
-        "LOG_LEVEL": "INFO",
+        "CONCURRENT_REQUESTS_PER_DOMAIN": 2,
+        "AUTOTHROTTLE_TARGET_CONCURRENCY": 2.0,
         "LOG_FILE": "colorndrive_log.txt",
     }
 
@@ -76,14 +126,17 @@ class ColorNDriveSpider(scrapy.Spider):
         return text.strip().title()
 
     @staticmethod
-    def _extract_hex(style):
+    def _extract_hexes(style):
         """
-        Extract a hex color from a CSS gradient style string.
-        'background: linear-gradient(to right, #616568 , #616568);'
-        → '#616568'
+        The two stops of the swatch gradient, as served.
+        'background: linear-gradient(to right, #B7B7B1 , #484948);'
+        → ('#B7B7B1', '#484948')
+        A missing stop comes back as ''.
         """
-        match = re.search(r"#([0-9a-fA-F]{6})", style or "")
-        return f"#{match.group(1)}" if match else ""
+        found = [f"#{h}" for h in HEX.findall(style or "")]
+        first = found[0] if found else ""
+        second = found[1] if len(found) > 1 else ""
+        return first, second
 
     @staticmethod
     def _make_slug_from_href(href):
@@ -167,7 +220,7 @@ class ColorNDriveSpider(scrapy.Spider):
             h4.color-list-page__item__title  → color codes ("LA7C / C2")
             h5.color-list-page__item__desc   → color name ("PEBBLE GREY METALLIC")
             ul.alternative-names li          → regional name variants
-            .color-list-page__item__color-pane style → hex via gradient
+            .color-list-page__item__color-pane style → swatch gradient stops
 
         Handles pagination via ?p=N query parameter.
         """
@@ -212,11 +265,11 @@ class ColorNDriveSpider(scrapy.Spider):
             all_names = [color_name] + alt_names
             full_name = ", ".join(all_names)
 
-            # Hex from swatch gradient
+            # Swatch gradient: both stops, as served
             style = item.css(
                 ".color-list-page__item__color-pane::attr(style)"
             ).get("")
-            color_hex = self._extract_hex(style)
+            color_hex, color_hex_2 = self._extract_hexes(style)
 
             yield {
                 "manufacturer": self._format_name(manufacturer),
@@ -224,6 +277,7 @@ class ColorNDriveSpider(scrapy.Spider):
                 "color_name": full_name,
                 "color_codes": ", ".join(codes),
                 "color_hex": color_hex,
+                "color_hex_2": color_hex_2,
             }
 
         # Follow next page if it exists
